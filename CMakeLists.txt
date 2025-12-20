@@ -87,10 +87,11 @@ file(APPEND "${GENERATED_PRESET_REGISTRY}" "        void  (*reset)  (void* state
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "        float (*process)(void* state, float x) = nullptr;\n")
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "    };\n\n")
 
+# make() NO constexpr (MSVC: constexpr + punteros a funciones desde lambdas puede romper)
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "    template <typename Preset>\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr Item make() noexcept\n    {\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static Item make() noexcept\n    {\n")
 
-# 1.2 Blindaje: State trivial (evita UB si alguien mete un State no-trivial)
+# Blindaje: State trivial (evita UB si alguien mete un State no-trivial)
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "        static_assert(std::is_trivially_default_constructible_v<typename Preset::State>,\n")
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "                      \"Preset::State must be trivially default constructible\");\n")
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "        static_assert(std::is_trivially_destructible_v<typename Preset::State>,\n")
@@ -111,10 +112,41 @@ file(APPEND "${GENERATED_PRESET_REGISTRY}" "                auto& s = *reinterpr
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "                return Preset::process (s, x);\n            }\n")
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "        };\n    }\n\n")
 
+# -----------------------------------------------------------------------------
+# Constexpr max helper (C++17), sin depender de que 'items' sea constexpr.
+# En MSVC, 'items' constexpr + punteros a función (desde lambdas) puede romper
+# la evaluación constante. Por eso: kMaxStateSize/kMaxStateAlign se calculan
+# desde tipos (sizeof/alignof) y 'items' se deja como inline const.
+# -----------------------------------------------------------------------------
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    template <std::size_t A, std::size_t B>\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    struct Max2 { static constexpr std::size_t value = (A > B ? A : B); };\n\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    template <std::size_t... Ns> struct MaxN;\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    template <std::size_t N> struct MaxN<N> { static constexpr std::size_t value = N; };\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    template <std::size_t N1, std::size_t N2, std::size_t... Rest>\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    struct MaxN<N1, N2, Rest...> {\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "        static constexpr std::size_t value = MaxN<Max2<N1, N2>::value, Rest...>::value;\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    };\n\n")
+
+# Packs de sizeof/alignof para todos los presets (desde los tipos)
+set(_STATE_SIZE_PACK "1")
+set(_STATE_ALIGN_PACK "alignof(std::max_align_t)")
+foreach(hdr IN LISTS PRESET_HEADERS)
+  get_filename_component(stem "${hdr}" NAME_WE)  # preset-Neve1073
+  string(REPLACE "preset-" "" preset_id "${stem}")
+  string(REGEX REPLACE "[^A-Za-z0-9_]" "_" preset_id "${preset_id}")
+  set(struct_name "Preset_${preset_id}")
+  string(APPEND _STATE_SIZE_PACK ", sizeof(typename ${struct_name}::State)")
+  string(APPEND _STATE_ALIGN_PACK ", alignof(typename ${struct_name}::State)")
+endforeach()
+
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::size_t kMaxStateSize  = MaxN<${_STATE_SIZE_PACK}>::value;\n")
+file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::size_t kMaxStateAlign = MaxN<${_STATE_ALIGN_PACK}>::value;\n\n")
+
+# Lista runtime de presets (inline const, NO constexpr)
 if(PRESET_COUNT EQUAL 0)
-  file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::array<Item, 0> items {{ }};\n\n")
+  file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static inline const std::array<Item, 0> items {{ }};\n\n")
 else()
-  file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::array<Item, ${PRESET_COUNT}> items {{\n")
+  file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static inline const std::array<Item, ${PRESET_COUNT}> items {{\n")
   foreach(hdr IN LISTS PRESET_HEADERS)
     get_filename_component(stem "${hdr}" NAME_WE)  # preset-Neve1073
     string(REPLACE "preset-" "" preset_id "${stem}")
@@ -125,16 +157,6 @@ else()
   file(APPEND "${GENERATED_PRESET_REGISTRY}" "    }};\n\n")
 endif()
 
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::size_t computeMaxStateSize() noexcept\n    {\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "        std::size_t m = 1;\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "        for (const auto& it : items) m = (it.stateSize > m) ? it.stateSize : m;\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "        return m;\n    }\n\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::size_t computeMaxStateAlign() noexcept\n    {\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "        std::size_t m = alignof(std::max_align_t);\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "        for (const auto& it : items) m = (it.stateAlign > m) ? it.stateAlign : m;\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "        return m;\n    }\n\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::size_t kMaxStateSize  = computeMaxStateSize();\n")
-file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static constexpr std::size_t kMaxStateAlign = computeMaxStateAlign();\n")
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "};\n")
 
 # 1.1 Agregar el header autogenerado al target (mejor IDE + dependencias)
@@ -177,4 +199,5 @@ target_link_libraries(PluginSaturador1 PRIVATE
   juce::juce_recommended_warning_flags
   juce::juce_recommended_lto_flags
 )
+
 
