@@ -60,6 +60,15 @@ public:
         addAndMakeVisible (toneKnob);
         addAndMakeVisible (mixKnob);
 
+        // ---------------------------------------------------------------------
+        // (Opcional) PNG encima de knobs (requiere BinaryData o carga desde archivo)
+        //
+        // Ejemplo de uso (requiere que cargues la imagen desde BinaryData o similar):
+        // driveKnob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::drive_png, BinaryData::drive_pngSize));
+        // toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
+        // mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
+        // ---------------------------------------------------------------------
+
         preampLabel.setText ("Preamp:", juce::dontSendNotification);
         preampLabel.setJustificationType (juce::Justification::centredLeft);
         preampLabel.setInterceptsMouseClicks (false, false);
@@ -84,7 +93,8 @@ public:
         mixAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
         preampAtt = std::make_unique<ComboBoxAttachment> (processor.apvts, "preamp", preampBox);
 
-        setSize (420, 210);
+        // ✅ UI más grande
+        setSize (540, 270);
     }
 
     ~MinimalEditor() override
@@ -99,22 +109,24 @@ public:
         g.fillAll (juce::Colours::black);
     }
 
+    // ✅ Más padding + knobs más pequeños + más espacio abajo
     void resized() override
     {
-        auto r = getLocalBounds().reduced (12);
+        auto r = getLocalBounds().reduced (18);
 
-        auto topRow = r.removeFromTop (160);
+        auto topRow = r.removeFromTop (185);
         const int w = topRow.getWidth() / 3;
 
-        driveKnob.setBounds (topRow.removeFromLeft (w).reduced (8));
-        toneKnob .setBounds (topRow.removeFromLeft (w).reduced (8));
-        mixKnob  .setBounds (topRow.removeFromLeft (w).reduced (8));
+        // knobs más pequeños: más "reduced"
+        driveKnob.setBounds (topRow.removeFromLeft (w).reduced (18));
+        toneKnob .setBounds (topRow.removeFromLeft (w).reduced (18));
+        mixKnob  .setBounds (topRow.removeFromLeft (w).reduced (18));
 
-        r.removeFromTop (6);
+        r.removeFromTop (10);
 
-        auto bottom = r.removeFromTop (32);
-        preampLabel.setBounds (bottom.removeFromLeft (70));
-        preampBox  .setBounds (bottom.reduced (0, 2));
+        auto bottom = r.removeFromTop (36);
+        preampLabel.setBounds (bottom.removeFromLeft (80));
+        preampBox  .setBounds (bottom.reduced (0, 4));
     }
 
 private:
@@ -247,12 +259,10 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     updateTiltCoeffs (*pTone);
 
-    // Level matcher (base)
-    levelMatch.prepare (sr);
-    levelMatch.setGateDb (-60.0f);
-    levelMatch.setClampDb (-12.0f, 12.0f);
-    levelMatch.setMeasurementWindowMs (140.0f);
-    levelMatch.setGainSmoothingMs (10.0f, 140.0f);
+    // ✅ AutoGain EXACTO por bloque (dry vs mixed)
+    autoGain.prepare (sr);
+    // Si quieres más agresivo/constante todavía:
+    // autoGain.setClampDb (-18.0f, +18.0f);
 
     // Oversampling (solo para WET)
     const auto channels = (size_t) juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
@@ -435,7 +445,10 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // -------------------------------------------------------------------------
-    // 3) Mix + level match + safety clip
+    // 3) Mix (primera pasada) + cálculo de energía por bloque
+    double dryPow   = 0.0;
+    double mixedPow = 0.0;
+
     for (int i = 0; i < numSamples; ++i)
     {
         const float mix01 = mixSm.getNextValue();
@@ -449,11 +462,30 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        // ✅ C) matcher estéreo correcto (ya lo tienes)
-        const float g = levelMatch.processStereo (dryL, dryR, mixedL, mixedR);
+        // Escribimos mixed SIN ganancia aún (buffer temporal = el propio buffer)
+        ch0[i] = mixedL;
+        if (ch1 != nullptr) ch1[i] = mixedR;
 
-        ch0[i] = plugin::softClipSafety (mixedL * g);
-        if (ch1 != nullptr) ch1[i] = plugin::softClipSafety (mixedR * g);
+        // Energía estéreo (promedio de potencias). Ratio da el match exacto RMS.
+        const double dP = 0.5 * (double(dryL)   * double(dryL)   + double(dryR)   * double(dryR));
+        const double mP = 0.5 * (double(mixedL) * double(mixedL) + double(mixedR) * double(mixedR));
+
+        dryPow   += dP;
+        mixedPow += mP;
+    }
+
+    // Potencias medias (escala estable)
+    dryPow   /= (double) juce::jmax (1, numSamples);
+    mixedPow /= (double) juce::jmax (1, numSamples);
+
+    // ✅ Gain exacto por bloque (con smoothing, clamp y gate interno)
+    const float g = autoGain.updateFromBlockPowers (dryPow, mixedPow);
+
+    // Segunda pasada: aplicar gain + softclip
+    for (int i = 0; i < numSamples; ++i)
+    {
+        ch0[i] = plugin::softClipSafety (ch0[i] * g);
+        if (ch1 != nullptr) ch1[i] = plugin::softClipSafety (ch1[i] * g);
     }
 }
 
