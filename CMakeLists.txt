@@ -57,6 +57,17 @@ juce_add_plugin(PluginSaturador1
 juce_generate_juce_header(PluginSaturador1)
 
 # -----------------------------------------------------------------------------
+# Assets (PNG) -> JUCE BinaryData
+# -----------------------------------------------------------------------------
+file(GLOB CONFIGURE_DEPENDS PLUGIN_ASSET_PNGS
+  "${CMAKE_CURRENT_SOURCE_DIR}/assets/*.png"
+)
+
+juce_add_binary_data(PluginSaturador1_BinaryData
+  SOURCES ${PLUGIN_ASSET_PNGS}
+)
+
+# -----------------------------------------------------------------------------
 # Presets auto-detectados: preset-*.h
 # Genera un PresetRegistry.h (PRO/stateful) en el directorio de build
 # y lo pone primero en includes.
@@ -135,7 +146,7 @@ file(APPEND "${GENERATED_PRESET_REGISTRY}" "    };\n\n")
 set(_STATE_SIZE_PACK "1")
 set(_STATE_ALIGN_PACK "alignof(std::max_align_t)")
 foreach(hdr IN LISTS PRESET_HEADERS)
-  get_filename_component(stem "${hdr}" NAME_WE)  # preset-Neve1073
+  get_filename_component(stem "${hdr}" NAME_WE)
   string(REPLACE "preset-" "" preset_id "${stem}")
   string(REGEX REPLACE "[^A-Za-z0-9_]" "_" preset_id "${preset_id}")
   set(struct_name "Preset_${preset_id}")
@@ -152,7 +163,7 @@ if(PRESET_COUNT EQUAL 0)
 else()
   file(APPEND "${GENERATED_PRESET_REGISTRY}" "    static inline const std::array<Item, ${PRESET_COUNT}> items {{\n")
   foreach(hdr IN LISTS PRESET_HEADERS)
-    get_filename_component(stem "${hdr}" NAME_WE)  # preset-Neve1073
+    get_filename_component(stem "${hdr}" NAME_WE)
     string(REPLACE "preset-" "" preset_id "${stem}")
     string(REGEX REPLACE "[^A-Za-z0-9_]" "_" preset_id "${preset_id}")
     set(struct_name "Preset_${preset_id}")
@@ -182,9 +193,6 @@ target_sources(PluginSaturador1 PRIVATE
   PluginProcessor.cpp
   PluginProcessor.h
   funciones.h
-  # OJO: PresetRegistry.h del SOURCE ya no es necesario si lo autogeneras.
-  # Lo puedes dejar, pero puede confundir en IDE. Recomiendo quitarlo:
-  # PresetRegistry.h
 )
 
 target_compile_definitions(PluginSaturador1 PRIVATE
@@ -194,6 +202,7 @@ target_compile_definitions(PluginSaturador1 PRIVATE
 )
 
 target_link_libraries(PluginSaturador1 PRIVATE
+  PluginSaturador1_BinaryData
   juce::juce_audio_processors
   juce::juce_dsp
   juce::juce_gui_basics
