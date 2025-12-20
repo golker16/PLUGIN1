@@ -57,28 +57,37 @@ juce_add_plugin(PluginSaturador1
 juce_generate_juce_header(PluginSaturador1)
 
 # -----------------------------------------------------------------------------
-# Assets (PNG) -> JUCE BinaryData  (ROBUSTO + LOGS + GUARD)
+# Assets (PNG) -> JUCE BinaryData (robusto + guard)
 # -----------------------------------------------------------------------------
+set(PLUGIN_ASSETS_DIR "${CMAKE_CURRENT_LIST_DIR}/assets")
+
 file(GLOB CONFIGURE_DEPENDS PLUGIN_ASSET_PNGS
-  "${PROJECT_SOURCE_DIR}/assets/*.png"
-  "${PROJECT_SOURCE_DIR}/assets/*.PNG"
+  "${PLUGIN_ASSETS_DIR}/*.[pP][nN][gG]"
 )
 
 list(LENGTH PLUGIN_ASSET_PNGS PLUGIN_ASSET_PNGS_COUNT)
-message(STATUS "PLUGIN_ASSET_PNGS       = ${PLUGIN_ASSET_PNGS}")
-message(STATUS "PLUGIN_ASSET_PNGS_COUNT = ${PLUGIN_ASSET_PNGS_COUNT}")
+message(STATUS "PLUGIN_ASSETS_DIR        = ${PLUGIN_ASSETS_DIR}")
+message(STATUS "PLUGIN_ASSET_PNGS        = ${PLUGIN_ASSET_PNGS}")
+message(STATUS "PLUGIN_ASSET_PNGS_COUNT  = ${PLUGIN_ASSET_PNGS_COUNT}")
 
-if (PLUGIN_ASSET_PNGS_COUNT EQUAL 0)
-  message(FATAL_ERROR
-    "No se encontraron PNGs en '${PROJECT_SOURCE_DIR}/assets'.\n"
-    "Asegúrate de que EXISTE la carpeta 'assets' junto a tu CMakeLists.txt\n"
-    "y que contiene: drive.png, tone.png, mix.png (o .PNG)."
+if (PLUGIN_ASSET_PNGS_COUNT GREATER 0)
+  juce_add_binary_data(PluginSaturador1_BinaryData
+    SOURCES ${PLUGIN_ASSET_PNGS}
   )
-endif()
 
-juce_add_binary_data(PluginSaturador1_BinaryData
-  SOURCES ${PLUGIN_ASSET_PNGS}
-)
+  target_link_libraries(PluginSaturador1 PRIVATE
+    PluginSaturador1_BinaryData
+  )
+
+  target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=1)
+else()
+  message(WARNING
+    "No se encontraron PNGs en '${PLUGIN_ASSETS_DIR}'. "
+    "El plugin compilará SIN imágenes. "
+    "Asegúrate de commitear drive.png, tone.png, mix.png (o revisar Git LFS)."
+  )
+  target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=0)
+endif()
 
 # -----------------------------------------------------------------------------
 # Presets auto-detectados: preset-*.h
@@ -211,8 +220,9 @@ target_compile_definitions(PluginSaturador1 PRIVATE
   JUCE_VST3_CAN_REPLACE_VST2=0
 )
 
+# OJO: NO meter PluginSaturador1_BinaryData aquí.
+# Ya se linkea arriba dentro del if() cuando existen PNGs.
 target_link_libraries(PluginSaturador1 PRIVATE
-  PluginSaturador1_BinaryData
   juce::juce_audio_processors
   juce::juce_dsp
   juce::juce_gui_basics
@@ -222,5 +232,4 @@ target_link_libraries(PluginSaturador1 PRIVATE
   juce::juce_recommended_warning_flags
   juce::juce_recommended_lto_flags
 )
-
 
