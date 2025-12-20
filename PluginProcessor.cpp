@@ -1,6 +1,15 @@
 #include "PluginProcessor.h"
-#include "BinaryData.h"
 #include <cstring> // std::memset
+
+//------------------------------------------------------------------------------
+// Si CMake no define PLUGIN_HAS_ASSETS por alguna razón, no rompas el build:
+#ifndef PLUGIN_HAS_ASSETS
+ #define PLUGIN_HAS_ASSETS 0
+#endif
+
+#if PLUGIN_HAS_ASSETS
+ #include "BinaryData.h"
+#endif
 
 //==============================================================================
 // Parameters
@@ -61,10 +70,12 @@ public:
         addAndMakeVisible (toneKnob);
         addAndMakeVisible (mixKnob);
 
-        // ✅ PNG encima de knobs (desde /assets -> BinaryData)
+        // ✅ PNG encima de knobs (desde /assets -> BinaryData) SOLO si existe
+       #if PLUGIN_HAS_ASSETS
         driveKnob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::drive_png, BinaryData::drive_pngSize));
         toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
+       #endif
 
         preampLabel.setText ("Preamp:", juce::dontSendNotification);
         preampLabel.setJustificationType (juce::Justification::centredLeft);
@@ -114,7 +125,6 @@ public:
         auto topRow = r.removeFromTop (185);
         const int w = topRow.getWidth() / 3;
 
-        // knobs más pequeños: más "reduced"
         driveKnob.setBounds (topRow.removeFromLeft (w).reduced (18));
         toneKnob .setBounds (topRow.removeFromLeft (w).reduced (18));
         mixKnob  .setBounds (topRow.removeFromLeft (w).reduced (18));
@@ -415,17 +425,14 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
                 float xL = L[n];
                 float xR = R[n];
 
-                // interacción estéreo PRO: freq + nivel + fase (micro allpass)
                 stereoInteract.processSample (xL, xR);
 
-                // procesa preset por canal con estados separados
                 L[n] = activePreset->process (stL, xL);
                 R[n] = activePreset->process (stR, xR);
             }
         }
         else
         {
-            // path mono (o canales != 2) como estaba
             for (size_t ch = 0; ch < osCh; ++ch)
             {
                 float* data = osBlock.getChannelPointer (ch);
@@ -457,11 +464,9 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        // Escribimos mixed SIN ganancia aún (buffer temporal = el propio buffer)
         ch0[i] = mixedL;
         if (ch1 != nullptr) ch1[i] = mixedR;
 
-        // Energía estéreo (promedio de potencias). Ratio da el match exacto RMS.
         const double dP = 0.5 * (double(dryL)   * double(dryL)   + double(dryR)   * double(dryR));
         const double mP = 0.5 * (double(mixedL) * double(mixedL) + double(mixedR) * double(mixedR));
 
@@ -469,11 +474,9 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         mixedPow += mP;
     }
 
-    // Potencias medias (escala estable)
     dryPow   /= (double) juce::jmax (1, numSamples);
     mixedPow /= (double) juce::jmax (1, numSamples);
 
-    // ✅ Gain exacto por bloque (con smoothing, clamp y gate interno)
     const float g = autoGain.updateFromBlockPowers (dryPow, mixedPow);
 
     // Segunda pasada: aplicar gain + softclip
@@ -490,4 +493,5 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
 
