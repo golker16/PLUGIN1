@@ -57,7 +57,7 @@ juce_add_plugin(PluginSaturador1
 juce_generate_juce_header(PluginSaturador1)
 
 # -----------------------------------------------------------------------------
-# Assets (PNG) -> JUCE BinaryData
+# Assets (PNG) -> JUCE BinaryData  (ROBUSTO + LOGS + GUARD)
 # -----------------------------------------------------------------------------
 file(GLOB CONFIGURE_DEPENDS PLUGIN_ASSET_PNGS
   "${PROJECT_SOURCE_DIR}/assets/*.png"
@@ -142,9 +142,6 @@ file(APPEND "${GENERATED_PRESET_REGISTRY}" "        };\n    }\n\n")
 
 # -----------------------------------------------------------------------------
 # Constexpr max helper (C++17), sin depender de que 'items' sea constexpr.
-# En MSVC, 'items' constexpr + punteros a función (desde lambdas) puede romper
-# la evaluación constante. Por eso: kMaxStateSize/kMaxStateAlign se calculan
-# desde tipos (sizeof/alignof) y 'items' se deja como inline const.
 # -----------------------------------------------------------------------------
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "    template <std::size_t A, std::size_t B>\n")
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "    struct Max2 { static constexpr std::size_t value = (A > B ? A : B); };\n\n")
@@ -187,7 +184,7 @@ endif()
 
 file(APPEND "${GENERATED_PRESET_REGISTRY}" "};\n")
 
-# 1.1 Agregar el header autogenerado al target (mejor IDE + dependencias)
+# Agregar el header autogenerado al target
 set_source_files_properties("${GENERATED_PRESET_REGISTRY}" PROPERTIES GENERATED TRUE)
 target_sources(PluginSaturador1 PRIVATE "${GENERATED_PRESET_REGISTRY}")
 
