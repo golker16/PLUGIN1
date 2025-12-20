@@ -1,0 +1,69 @@
+name: build-vst3-windows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (CMake, VS2022 x64 Release)
+        run: >
+          cmake -S . -B build
+          -G "Visual Studio 17 2022"
+          -A x64
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel
+
+      - name: Locate VST3 bundle + verify moduleinfo.json + package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+          # Encuentra carpetas *.vst3 generadas
+          $vst3Dirs = Get-ChildItem -Path build -Recurse -Directory -Filter "*.vst3"
+
+          if (-not $vst3Dirs -or $vst3Dirs.Count -eq 0) {
+            Write-Error "No se encontró ningún bundle .vst3 dentro de build/. Revisa la ruta de artefacts."
+            exit 1
+          }
+
+          foreach ($p in $vst3Dirs) {
+            $dest = Join-Path "dist" $p.Name
+            if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+
+            Copy-Item -Recurse -Force $p.FullName $dest
+
+            # moduleinfo.json debe vivir en: <Plugin>.vst3/Contents/Resources/moduleinfo.json
+            $mi = Join-Path $dest "Contents/Resources/moduleinfo.json"
+            if (-not (Test-Path $mi)) {
+              Write-Error "Falta moduleinfo.json en: $mi  (FL Studio 2025 puede no verificar/detectar el plugin sin esto)"
+              exit 1
+            }
+
+            Write-Host "OK: bundle copiado -> $dest"
+            Write-Host "OK: moduleinfo.json -> $mi"
+          }
+
+          # Zip del/los bundles .vst3
+          $zipPath = "dist/PluginSaturador1-vst3-windows.zip"
+          if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+
+          Compress-Archive -Path "dist/*.vst3" -DestinationPath $zipPath
+          Write-Host "ZIP creado: $zipPath"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PluginSaturador1-vst3-windows
+          path: dist/PluginSaturador1-vst3-windows.zip
