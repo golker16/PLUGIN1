@@ -236,10 +236,11 @@ struct SimpleKnobLookAndFeel : juce::LookAndFeel_V4
         g.setColour (valueColour);
         g.strokePath (valueArc, juce::PathStrokeType (lineW, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-        auto c = bounds.getCentre();
-        juce::Point<float> p (c.x + std::cos (angle) * (radius - lineW),
-                              c.y + std::sin (angle) * (radius - lineW));
-        g.fillEllipse (p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f);
+        // ✅ Eliminado: marcador/punto (fillEllipse) para que quede solo rueda + llenado
+        // auto c = bounds.getCentre();
+        // juce::Point<float> p (c.x + std::cos (angle) * (radius - lineW),
+        //                       c.y + std::sin (angle) * (radius - lineW));
+        // g.fillEllipse (p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f);
     }
 };
 
