@@ -35,10 +35,7 @@ inline float equalPowerMix (float dry, float wet, float mix01) noexcept
 
 //==============================================================================
 // LevelMatcher: RMS (EMA) + gate + clamp + smoothing attack/release
-// Mejoras:
-//  - Medición por POTENCIA estéreo (L^2 + R^2) (sin cancelación por fase)
-//  - HPF solo para la medición (más perceptual, menos dependencia de graves/tone)
-//  - "Return-to-unity" lento cuando el gate no se cumple (evita subir ruido)
+// (Lo dejamos por si lo quieres reutilizar, pero YA NO lo usaremos en el plugin)
 class LevelMatcher
 {
 public:
@@ -46,11 +43,11 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-        setMeasurementWindowMs (160.0f);      // más reactivo que 300ms, menos “lag”
-        setGainSmoothingMs (8.0f, 120.0f);    // baja rápido si te pasas, sube suave
+        setMeasurementWindowMs (160.0f);
+        setGainSmoothingMs (8.0f, 120.0f);
         setGateDb (-60.0f);
-        setClampDb (-18.0f, +18.0f);          // un poco más margen para drive fuerte
-        setMeasureHighpassHz (120.0f);        // clave para que tone/low-end no “mueva” el match
+        setClampDb (-18.0f, +18.0f);
+        setMeasureHighpassHz (120.0f);
         setReturnToUnityMs (600.0f);
 
         reset();
@@ -65,7 +62,6 @@ public:
         compGain = 1.0f;
         targetGain = 1.0f;
 
-        // HP states (medición)
         hp_x1[0] = hp_x1[1] = 0.0f;
         hp_y1[0] = hp_y1[1] = 0.0f;
     }
@@ -94,36 +90,29 @@ public:
         gainReleaseAlpha = alphaFromMs (releaseMs);
     }
 
-    // Cuando no hay señal (gate), targetGain vuelve lentamente hacia 1.0
     void setReturnToUnityMs (float ms)
     {
         returnAlpha = alphaFromMs (ms);
     }
 
-    // HPF 1er orden SOLO para medición (no afecta audio)
     void setMeasureHighpassHz (float hz)
     {
         const float fc = juce::jlimit (5.0f, 1000.0f, hz);
         hpA = std::exp (-2.0f * juce::MathConstants<float>::pi * (fc / (float) sr));
     }
 
-    // Mantengo tu API mono por compat
     float process (float drySample, float mixedSample)
     {
-        // trata el mono como estéreo linkeado (L=R)
         return processStereo (drySample, drySample, mixedSample, mixedSample);
     }
 
-    // ✅ Nuevo: match estéreo correcto (sin cancelación por fase)
     float processStereo (float dryL, float dryR, float outL, float outR)
     {
-        // Medición ponderada (HPF) solo para el detector
         const float mdL = measureHP (dryL, 0);
         const float mdR = measureHP (dryR, 1);
         const float moL = measureHP (outL, 0);
         const float moR = measureHP (outR, 1);
 
-        // Potencia estéreo linkeada (promedio de potencias)
         const float refP = 0.5f * (mdL * mdL + mdR * mdR);
         const float outP = 0.5f * (moL * moL + moR * moR);
 
@@ -143,11 +132,9 @@ public:
         }
         else
         {
-            // sin señal: vuelve lento a unity para no “quedarte” amplificando ruido
             targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
         }
 
-        // Suavizado de ganancia (baja rápido, sube más lento)
         const bool needDown = (targetGain < compGain);
         const float a = needDown ? gainAttackAlpha : gainReleaseAlpha;
         compGain = a * compGain + (1.0f - a) * targetGain;
@@ -164,7 +151,6 @@ private:
 
     float measureHP (float x, int ch) noexcept
     {
-        // 1er orden HP: y = a*(y1 + x - x1)
         const float y = hpA * (hp_y1[ch] + x - hp_x1[ch]);
         hp_x1[ch] = x;
         hp_y1[ch] = y;
@@ -188,7 +174,6 @@ private:
 
     float returnAlpha = 0.9999f;
 
-    // HPF detector states
     float hpA = 0.98f;
     float hp_x1[2] = { 0.0f, 0.0f };
     float hp_y1[2] = { 0.0f, 0.0f };
@@ -285,8 +270,7 @@ private:
     float minGain = juce::Decibels::decibelsToGain (-12.0f);
     float maxGain = juce::Decibels::decibelsToGain (+12.0f);
 
-    float gatePow = juce::Decibels::decibelsToGain (-65.0f)
-                  * juce::Decibels::decibelsToGain (-65.0f);
+    float gatePow = juce::Decibels::decibelsToGain (-65.0f) * juce::Decibels::decibelsToGain (-65.0f);
 
     float attackAlpha  = 0.999f;
     float releaseAlpha = 0.9995f;
@@ -336,13 +320,10 @@ struct SimpleKnobLookAndFeel : juce::LookAndFeel_V4
         g.strokePath (valueArc, juce::PathStrokeType (lineW, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
         // ✅ Eliminado: marcador/punto (fillEllipse) para que quede solo rueda + llenado
-        // auto c = bounds.getCentre();
-        // juce::Point<float> p (c.x + std::cos (angle) * (radius - lineW),
-        //                       c.y + std::sin (angle) * (radius - lineW));
-        // g.fillEllipse (p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f);
     }
 };
 
+// ✅ Nuevo LabeledKnob: permite PNG encima del knob sin romper lo actual
 struct LabeledKnob : juce::Component
 {
     juce::Label  label;
@@ -380,9 +361,7 @@ struct LabeledKnob : juce::Component
         label.setVisible (!hasImg);
 
         if (hasImg)
-        {
             imageComp.setImage (labelImage, juce::RectanglePlacement::centred);
-        }
 
         resized();
         repaint();
