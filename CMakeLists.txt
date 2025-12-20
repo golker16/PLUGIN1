@@ -60,8 +60,21 @@ juce_generate_juce_header(PluginSaturador1)
 # Assets (PNG) -> JUCE BinaryData
 # -----------------------------------------------------------------------------
 file(GLOB CONFIGURE_DEPENDS PLUGIN_ASSET_PNGS
-  "${CMAKE_CURRENT_SOURCE_DIR}/assets/*.png"
+  "${PROJECT_SOURCE_DIR}/assets/*.png"
+  "${PROJECT_SOURCE_DIR}/assets/*.PNG"
 )
+
+list(LENGTH PLUGIN_ASSET_PNGS PLUGIN_ASSET_PNGS_COUNT)
+message(STATUS "PLUGIN_ASSET_PNGS       = ${PLUGIN_ASSET_PNGS}")
+message(STATUS "PLUGIN_ASSET_PNGS_COUNT = ${PLUGIN_ASSET_PNGS_COUNT}")
+
+if (PLUGIN_ASSET_PNGS_COUNT EQUAL 0)
+  message(FATAL_ERROR
+    "No se encontraron PNGs en '${PROJECT_SOURCE_DIR}/assets'.\n"
+    "Asegúrate de que EXISTE la carpeta 'assets' junto a tu CMakeLists.txt\n"
+    "y que contiene: drive.png, tone.png, mix.png (o .PNG)."
+  )
+endif()
 
 juce_add_binary_data(PluginSaturador1_BinaryData
   SOURCES ${PLUGIN_ASSET_PNGS}
