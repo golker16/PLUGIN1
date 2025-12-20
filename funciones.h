@@ -198,6 +198,105 @@ private:
 };
 
 //==============================================================================
+// AutoGainExact: match RMS por bloque (dry vs mixed) + clamp + smoothing.
+// - "Exacto" en el sentido de RMS/energía: mover Drive/Tone/Mix no cambia nivel.
+// - Gate: si hay silencio, no persigue ruido (return-to-unity).
+class AutoGainExact
+{
+public:
+    void prepare (double sampleRate)
+    {
+        sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
+
+        setClampDb (-12.0f, +12.0f);
+        setGateDb (-65.0f);
+        setSmoothingMs (4.0f, 80.0f);   // baja rápido, sube suave
+        setReturnToUnityMs (500.0f);
+
+        reset();
+    }
+
+    void reset()
+    {
+        compGain   = 1.0f;
+        targetGain = 1.0f;
+    }
+
+    void setClampDb (float minDb, float maxDb)
+    {
+        minGain = juce::Decibels::decibelsToGain (minDb);
+        maxGain = juce::Decibels::decibelsToGain (maxDb);
+    }
+
+    void setGateDb (float gateDb)
+    {
+        const float gateLin = juce::Decibels::decibelsToGain (gateDb);
+        gatePow = gateLin * gateLin;
+    }
+
+    void setSmoothingMs (float attackMs, float releaseMs)
+    {
+        attackAlpha  = alphaFromMs (attackMs);
+        releaseAlpha = alphaFromMs (releaseMs);
+    }
+
+    void setReturnToUnityMs (float ms)
+    {
+        returnAlpha = alphaFromMs (ms);
+    }
+
+    // Calcula/actualiza el gain desde energía por bloque.
+    // dryPow / mixedPow son POTENCIAS medias (o sumas, ratio es el mismo).
+    float updateFromBlockPowers (double dryPow, double mixedPow)
+    {
+        const bool gateOk = (dryPow > (double) gatePow) && (mixedPow > (double) gatePow);
+
+        if (gateOk)
+        {
+            const double ratio = dryPow / (mixedPow + 1.0e-20);
+            float g = (float) std::sqrt (ratio);
+
+            g = juce::jlimit (minGain, maxGain, g);
+            targetGain = g;
+        }
+        else
+        {
+            // sin señal -> vuelve lento a unity
+            targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
+        }
+
+        // smoothing: si baja, ataque; si sube, release
+        const bool needDown = (targetGain < compGain);
+        const float a = needDown ? attackAlpha : releaseAlpha;
+        compGain = a * compGain + (1.0f - a) * targetGain;
+
+        return compGain;
+    }
+
+private:
+    float alphaFromMs (float ms) const
+    {
+        const float tau = juce::jmax (1.0e-4f, ms * 0.001f);
+        return std::exp (-1.0f / (tau * (float) sr));
+    }
+
+    double sr = 48000.0;
+
+    float minGain = juce::Decibels::decibelsToGain (-12.0f);
+    float maxGain = juce::Decibels::decibelsToGain (+12.0f);
+
+    float gatePow = juce::Decibels::decibelsToGain (-65.0f)
+                  * juce::Decibels::decibelsToGain (-65.0f);
+
+    float attackAlpha  = 0.999f;
+    float releaseAlpha = 0.9995f;
+    float returnAlpha  = 0.9999f;
+
+    float compGain = 1.0f;
+    float targetGain = 1.0f;
+};
+
+//==============================================================================
 // UI helpers
 namespace ui
 {
@@ -249,6 +348,10 @@ struct LabeledKnob : juce::Component
     juce::Label  label;
     juce::Slider slider;
 
+    // ✅ Nuevo: imagen opcional como "label" encima del knob
+    juce::Image labelImage;
+    juce::ImageComponent imageComp;
+
     explicit LabeledKnob (const juce::String& name)
     {
         label.setText (name, juce::dontSendNotification);
@@ -259,15 +362,46 @@ struct LabeledKnob : juce::Component
         slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         slider.setMouseDragSensitivity (140);
 
+        imageComp.setInterceptsMouseClicks (false, false);
+        imageComp.setVisible (false); // por defecto NO hay PNG
+
         addAndMakeVisible (label);
+        addAndMakeVisible (imageComp);
         addAndMakeVisible (slider);
+    }
+
+    // Llama a esto para poner un PNG encima del knob
+    void setLabelImage (juce::Image img)
+    {
+        labelImage = img;
+        const bool hasImg = labelImage.isValid();
+
+        imageComp.setVisible (hasImg);
+        label.setVisible (!hasImg);
+
+        if (hasImg)
+        {
+            imageComp.setImage (labelImage, juce::RectanglePlacement::centred);
+        }
+
+        resized();
+        repaint();
     }
 
     void resized() override
     {
         auto r = getLocalBounds();
-        label.setBounds (r.removeFromTop (18));
-        slider.setBounds (r.reduced (2));
+
+        // Más espacio arriba si hay imagen
+        const int topH = imageComp.isVisible() ? 26 : 18;
+
+        if (imageComp.isVisible())
+            imageComp.setBounds (r.removeFromTop (topH).reduced (2));
+        else
+            label.setBounds (r.removeFromTop (topH));
+
+        // Knob un poco más pequeño visualmente:
+        slider.setBounds (r.reduced (6));
     }
 };
 } // namespace ui
