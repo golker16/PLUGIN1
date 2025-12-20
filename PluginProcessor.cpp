@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "BinaryData.h"
 #include <cstring> // std::memset
 
 //==============================================================================
@@ -60,14 +61,10 @@ public:
         addAndMakeVisible (toneKnob);
         addAndMakeVisible (mixKnob);
 
-        // ---------------------------------------------------------------------
-        // (Opcional) PNG encima de knobs (requiere BinaryData o carga desde archivo)
-        //
-        // Ejemplo de uso (requiere que cargues la imagen desde BinaryData o similar):
-        // driveKnob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::drive_png, BinaryData::drive_pngSize));
-        // toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
-        // mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
-        // ---------------------------------------------------------------------
+        // ✅ PNG encima de knobs (desde /assets -> BinaryData)
+        driveKnob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::drive_png, BinaryData::drive_pngSize));
+        toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
+        mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
 
         preampLabel.setText ("Preamp:", juce::dontSendNotification);
         preampLabel.setJustificationType (juce::Justification::centredLeft);
@@ -261,8 +258,6 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     // ✅ AutoGain EXACTO por bloque (dry vs mixed)
     autoGain.prepare (sr);
-    // Si quieres más agresivo/constante todavía:
-    // autoGain.setClampDb (-18.0f, +18.0f);
 
     // Oversampling (solo para WET)
     const auto channels = (size_t) juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
@@ -495,3 +490,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
