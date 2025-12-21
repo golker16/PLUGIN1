@@ -252,7 +252,6 @@ private:
         std::aligned_storage_t<PresetRegistry::kMaxStateSize, PresetRegistry::kMaxStateAlign>;
     std::array<PresetStateStorage, 2> presetState {}; // hasta estéreo
 
-    // ✅ CAMBIO 2.1: reemplazar LevelMatcher por AutoGainExact
     plugin::AutoGainExact autoGain;
 
     // ✅ Nuevo: interacción estéreo PRO para oversampled
