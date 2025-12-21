@@ -238,6 +238,10 @@ private:
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampling;
     juce::AudioBuffer<float> wetBuffer;
 
+    // En algunos hosts (incl. FL Studio) el tamaño de bloque puede variar.
+    // Guardamos el máximo inicial para poder re-inicializar buffers/OS si crece.
+    int maxBlockSizePrepared = 0;
+
     // ✅ 3.1) Dry delay para alinear con latencia del oversampling (solo necesario si usas MIX)
     juce::AudioBuffer<float> dryDelayBuffer;
     int dryDelayWritePos   = 0;
@@ -262,4 +266,6 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (YourPluginAudioProcessor)
 };
+
+
 
