@@ -196,16 +196,18 @@ public:
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
         // Para distorsión casi siempre quieres atenuar mucho y subir poquito.
-        // Si quieres aún más "constante", puedes bajar minDb a -60 dB.
-        setClampDb (-48.0f, +6.0f);
+        // Para que REALMENTE no suba/baje al mover knobs, necesitas permitir más rango.
+        // (Si lo dejas en +6 dB, cualquier preset/drive que suba más que eso jamás se compensará.)
+        setClampDb (-60.0f, +18.0f);
         setGateDb  (-70.0f);
 
         // Responde rápido a picos/subidas (baja), y más lento al recuperar (sube).
         setSmoothingMs      (2.5f, 140.0f);
         setReturnToUnityMs  (650.0f);
 
-        // Medición: highpass para no sobre-compensar por low end.
-        setMeasureHighpassHz (120.0f);
+        // Medición: HP para que DC/subgrave no engañe, pero no tan alto que ignore el cuerpo.
+        // 60 Hz suele dar un "volumen percibido" más estable cuando mueves Tone.
+        setMeasureHighpassHz (60.0f);
 
         reset();
     }
