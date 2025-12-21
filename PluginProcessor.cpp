@@ -689,20 +689,17 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // -------------------------------------------------------------------------
-    // 3) Mix + AUTO-LEVEL (volumen constante)
-    //
-    // IMPORTANTE:
-    // - Medimos potencia (filtrada HP) en ENTRADA alineada (dryDelay) vs SALIDA *PRE* autoGain.
-    // - Luego calculamos la ganancia OBJETIVO para ESTE bloque y la aplicamos con una rampa
-    //   (de gStart -> gEnd) + softClipSafety.
-    //
-    // ⚠️ Importante: si mides la salida DESPUÉS de aplicar la ganancia compensatoria, el ratio
-    // tiende a 1 y el autogain “se cancela” (se vuelve hacia 1.0 aunque el nivel real haya cambiado).
-    double inPow  = 0.0;
-    double outPow = 0.0;
-
-    // Ganancia al inicio del bloque (la del bloque anterior)
-    const float gStart = autoGain.getGain();
+    // 3) Mix + AUTO-LEVEL (volumen constante) - ULTRA (por muestra)
+//
+// Objetivo: que el volumen se mantenga constante aunque muevas cualquier knob.
+// Este modo es muy estable en hosts con buffer variable (FL Studio, etc.).
+//
+// Medimos potencia (HP) de:
+//   - ENTRADA: dry ALINEADO con la latencia del oversampling (dryDelay)
+//   - SALIDA:  mixed PRE autogain
+// y aplicamos la ganancia compensatoria por muestra (con attack/release internos).
+//
+// ⚠️ Importante: la medición de salida es PRE gain para evitar auto-cancelación.
 
     // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
     auto* dL = dryDelayBuffer.getWritePointer (0);
@@ -710,9 +707,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const int size = dryDelayBuffer.getNumSamples();
 
-    // 1) Primer pase: crear la señal MIXED (pre autogain), y medir potencias.
-    //    Es MUCHO más estable (y "se siente" inmediato al mover knobs) que aplicar una
-    //    ganancia calculada con 1 bloque de retraso.
     for (int i = 0; i < numSamples; ++i)
     {
         const float mix01 = mixSm.getNextValue();
@@ -744,46 +738,14 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        // Guardamos temporalmente la salida PRE-autogain en el buffer principal.
-        ch0[i] = mixedL;
-        if (ch1 != nullptr) ch1[i] = mixedR;
+        // AutoGain ULTRA: calcula ganancia desde dry vs mixed PRE gain
+        const float g = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
 
-        // Medición filtrada (HP) para que el low-end no "engañe" el autogain.
-        // ✅ OJO: medimos la salida ANTES de aplicar autogain.
-        const float inML  = autoGain.measureIn  (dryL, 0);
-        const float inMR  = autoGain.measureIn  (dryR, 1);
-        const float outML = autoGain.measureOut (mixedL, 0);
-        const float outMR = autoGain.measureOut (mixedR, 1);
-
-        const double pIn  = 0.5 * (double (inML)  * double (inML)  + double (inMR)  * double (inMR));
-        const double pOut = 0.5 * (double (outML) * double (outML) + double (outMR) * double (outMR));
-
-        inPow  += pIn;
-        outPow += pOut;
-    }
-
-    inPow  /= (double) juce::jmax (1, numSamples);
-    outPow /= (double) juce::jmax (1, numSamples);
-
-    // 2) Actualiza ganancia en base a ESTE bloque.
-    const float gEnd = autoGain.updateFromBlockPowers (inPow, outPow, numSamples);
-
-    // 3) Segundo pase: aplicar ganancia con rampa + safety clip (evita clicks al mover knobs).
-    if (numSamples > 0)
-    {
-        float g = gStart;
-        const float dg = (numSamples > 1) ? ((gEnd - gStart) / (float) (numSamples - 1)) : 0.0f;
-
-        for (int i = 0; i < numSamples; ++i)
-        {
-            ch0[i] = plugin::softClipSafety (ch0[i] * g);
-            if (ch1 != nullptr)
-                ch1[i] = plugin::softClipSafety (ch1[i] * g);
-            g += dg;
-        }
+        ch0[i] = plugin::softClipSafety (mixedL * g);
+        if (ch1 != nullptr)
+            ch1[i] = plugin::softClipSafety (mixedR * g);
     }
 }
-
 //==============================================================================
 // This creates new instances of the plugin.
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
