@@ -493,6 +493,14 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     oversampling->initProcessing ((size_t) samplesPerBlock);
     setLatencySamples ((int) oversampling->getLatencyInSamples());
 
+    // ✅ 3.2) Inicializar dry delay justo después de setLatencySamples(...)
+    dryDelaySamples    = (int) oversampling->getLatencyInSamples();
+    dryDelayWritePos   = 0;
+    dryDelayBufferSize = samplesPerBlock + dryDelaySamples + 1;
+
+    dryDelayBuffer.setSize ((int) channels, dryDelayBufferSize, false, false, true);
+    dryDelayBuffer.clear();
+
     // buffers
     wetBuffer.setSize ((int) juce::jmax ((size_t)1, juce::jmin ((size_t)2, channels)),
                        samplesPerBlock, false, false, true);
@@ -663,12 +671,36 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     double dryPow   = 0.0;
     double mixedPow = 0.0;
 
+    // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
+    auto* dL = dryDelayBuffer.getWritePointer (0);
+    auto* dR = (dryDelayBuffer.getNumChannels() > 1) ? dryDelayBuffer.getWritePointer (1) : nullptr;
+
+    const int size = dryDelayBuffer.getNumSamples();
+
     for (int i = 0; i < numSamples; ++i)
     {
         const float mix01 = mixSm.getNextValue();
 
-        const float dryL = ch0[i];
-        const float dryR = (ch1 != nullptr) ? ch1[i] : dryL;
+        // ✅ DRY retrasado/alineado con oversampling
+        const int wp = dryDelayWritePos;
+        int rp = wp - dryDelaySamples;
+        if (rp < 0) rp += size;
+
+        // entrada actual (sin delay)
+        const float inL = ch0[i];
+        const float inR = (ch1 != nullptr) ? ch1[i] : inL;
+
+        // escribir entrada al delay
+        dL[wp] = inL;
+        if (dR != nullptr) dR[wp] = inR;
+
+        // leer dry alineado
+        const float dryL = dL[rp];
+        const float dryR = (dR != nullptr) ? dR[rp] : dryL;
+
+        // avanzar puntero
+        dryDelayWritePos = wp + 1;
+        if (dryDelayWritePos >= size) dryDelayWritePos = 0;
 
         const float wetOutL = wetL[i];
         const float wetOutR = (wetR != nullptr) ? wetR[i] : wetOutL;
@@ -705,3 +737,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
