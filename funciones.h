@@ -339,6 +339,9 @@ struct LabeledKnob : juce::Component
         label.setJustificationType (juce::Justification::centred);
         label.setInterceptsMouseClicks (false, false);
 
+        // ✅ (E) fallback label más pequeño si no hay PNG
+        label.setFont (juce::Font (9.0f));
+
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         slider.setMouseDragSensitivity (140);
@@ -361,7 +364,16 @@ struct LabeledKnob : juce::Component
         label.setVisible (!hasImg);
 
         if (hasImg)
-            imageComp.setImage (labelImage, juce::RectanglePlacement::centred);
+        {
+            // ✅ (A) no deformar, centrar, y solo reducir si el espacio es chico
+            imageComp.setImage (labelImage);
+            imageComp.setImagePlacement (juce::RectanglePlacement::centred
+                                       | juce::RectanglePlacement::onlyReduceInSize);
+        }
+        else
+        {
+            imageComp.setImage (juce::Image()); // limpia
+        }
 
         resized();
         repaint();
@@ -371,18 +383,24 @@ struct LabeledKnob : juce::Component
     {
         auto r = getLocalBounds();
 
-        // Más espacio arriba si hay imagen
-        const int topH = imageComp.isVisible() ? 26 : 18;
+        // ✅ (B) slot superior más pequeño (PNG o texto)
+        const int topH = imageComp.isVisible() ? 16 : 14;
 
         if (imageComp.isVisible())
-            imageComp.setBounds (r.removeFromTop (topH).reduced (2));
+        {
+            // ✅ (D) más “mini” y centrado
+            imageComp.setBounds (r.removeFromTop (topH).reduced (1, 2));
+        }
         else
+        {
             label.setBounds (r.removeFromTop (topH));
+        }
 
-        // Knob un poco más pequeño visualmente:
-        slider.setBounds (r.reduced (6));
+        // ✅ (C) knob más pequeño (slider interno más reducido)
+        slider.setBounds (r.reduced (12, 10));
     }
 };
 } // namespace ui
 
 } // namespace plugin
+
