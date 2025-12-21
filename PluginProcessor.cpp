@@ -689,7 +689,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     dryPow   /= (double) juce::jmax (1, numSamples);
     mixedPow /= (double) juce::jmax (1, numSamples);
 
-    const float g = autoGain.updateFromBlockPowers (dryPow, mixedPow);
+    const float g = autoGain.updateFromBlockPowers (dryPow, mixedPow, numSamples);
 
     // Segunda pasada: aplicar gain + softclip
     for (int i = 0; i < numSamples; ++i)
