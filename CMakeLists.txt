@@ -57,19 +57,52 @@ juce_add_plugin(PluginSaturador1
 juce_generate_juce_header(PluginSaturador1)
 
 # -----------------------------------------------------------------------------
-# Assets (PNG) -> JUCE BinaryData (robusto + guard)
+# Assets (PNG) -> JUCE BinaryData (DIAGNÓSTICO + GLOB ROBUSTO)
 # -----------------------------------------------------------------------------
+
+# --- Assets: carpeta base ---
 set(PLUGIN_ASSETS_DIR "${CMAKE_CURRENT_LIST_DIR}/assets")
 
-file(GLOB CONFIGURE_DEPENDS PLUGIN_ASSET_PNGS
-  "${PLUGIN_ASSETS_DIR}/*.[pP][nN][gG]"
+message(STATUS "PLUGIN_ASSETS_DIR        = ${PLUGIN_ASSETS_DIR}")
+
+# 1) Verifica que el directorio exista
+if(NOT EXISTS "${PLUGIN_ASSETS_DIR}")
+  message(FATAL_ERROR "No existe PLUGIN_ASSETS_DIR: '${PLUGIN_ASSETS_DIR}'")
+endif()
+
+# 2) Lista contenido (clave para saber si CI realmente tiene los png)
+message(STATUS "Listando contenido de assets (CI debug):")
+execute_process(
+  COMMAND ${CMAKE_COMMAND} -E ls "${PLUGIN_ASSETS_DIR}"
+  RESULT_VARIABLE _ls_res
+  OUTPUT_VARIABLE _ls_out
+  ERROR_VARIABLE  _ls_err
+)
+message(STATUS "${_ls_out}")
+if(NOT _ls_res EQUAL 0)
+  message(WARNING "cmake -E ls falló: ${_ls_err}")
+endif()
+
+# 3) Glob robusto (incluye .png y .PNG, y reconfigura si cambian archivos)
+file(GLOB_RECURSE PLUGIN_ASSET_PNGS
+  CONFIGURE_DEPENDS
+  "${PLUGIN_ASSETS_DIR}/*.png"
+  "${PLUGIN_ASSETS_DIR}/*.PNG"
 )
 
 list(LENGTH PLUGIN_ASSET_PNGS PLUGIN_ASSET_PNGS_COUNT)
-message(STATUS "PLUGIN_ASSETS_DIR        = ${PLUGIN_ASSETS_DIR}")
+
 message(STATUS "PLUGIN_ASSET_PNGS        = ${PLUGIN_ASSET_PNGS}")
 message(STATUS "PLUGIN_ASSET_PNGS_COUNT  = ${PLUGIN_ASSET_PNGS_COUNT}")
 
+if(PLUGIN_ASSET_PNGS_COUNT EQUAL 0)
+  message(WARNING
+    "No se encontraron PNGs en '${PLUGIN_ASSETS_DIR}'. "
+    "Si en tu repo existen, entonces NO llegaron al checkout del runner (revisar Git LFS/submodules)."
+  )
+endif()
+
+# 4) Si hay PNGs -> embebe en BinaryData + define macro
 if (PLUGIN_ASSET_PNGS_COUNT GREATER 0)
   juce_add_binary_data(PluginSaturador1_BinaryData
     SOURCES ${PLUGIN_ASSET_PNGS}
@@ -81,11 +114,6 @@ if (PLUGIN_ASSET_PNGS_COUNT GREATER 0)
 
   target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=1)
 else()
-  message(WARNING
-    "No se encontraron PNGs en '${PLUGIN_ASSETS_DIR}'. "
-    "El plugin compilará SIN imágenes. "
-    "Asegúrate de commitear drive.png, tone.png, mix.png (o revisar Git LFS)."
-  )
   target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=0)
 endif()
 
