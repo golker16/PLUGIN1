@@ -183,7 +183,7 @@ private:
 };
 
 //==============================================================================
-// AutoGainExact: match RMS por bloque (dry vs mixed) + clamp + smoothing.
+// AutoGainExact: match RMS por bloque (dry vs mixed) + clamp + smoothing (correcto por BLOQUE).
 class AutoGainExact
 {
 public:
@@ -192,9 +192,10 @@ public:
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
         setClampDb (-12.0f, +12.0f);
-        setGateDb (-65.0f);
-        setSmoothingMs (4.0f, 80.0f);   // baja rápido, sube suave
-        setReturnToUnityMs (500.0f);
+        setGateDb  (-65.0f);
+
+        setSmoothingMs      (4.0f, 80.0f);   // baja rápido, sube suave
+        setReturnToUnityMs  (500.0f);
 
         reset();
     }
@@ -217,19 +218,22 @@ public:
         gatePow = gateLin * gateLin;
     }
 
-    void setSmoothingMs (float attackMs, float releaseMs)
+    void setSmoothingMs (float newAttackMs, float newReleaseMs)
     {
-        attackAlpha  = alphaFromMs (attackMs);
-        releaseAlpha = alphaFromMs (releaseMs);
+        attackMs  = juce::jmax (0.1f, newAttackMs);
+        releaseMs = juce::jmax (0.1f, newReleaseMs);
     }
 
     void setReturnToUnityMs (float ms)
     {
-        returnAlpha = alphaFromMs (ms);
+        returnMs = juce::jmax (1.0f, ms);
     }
 
-    float updateFromBlockPowers (double dryPow, double mixedPow)
+    // 🔥 CAMBIO CLAVE: ahora recibe numSamples para que el smoothing sea correcto por bloque
+    float updateFromBlockPowers (double dryPow, double mixedPow, int numSamples)
     {
+        numSamples = juce::jmax (1, numSamples);
+
         const bool gateOk = (dryPow > (double) gatePow) && (mixedPow > (double) gatePow);
 
         if (gateOk)
@@ -242,21 +246,25 @@ public:
         }
         else
         {
-            targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
+            // vuelve a 1.0 suavemente cuando no hay señal útil
+            const float aRet = alphaFromMsBlock (returnMs, numSamples);
+            targetGain = aRet * targetGain + (1.0f - aRet) * 1.0f;
         }
 
         const bool needDown = (targetGain < compGain);
-        const float a = needDown ? attackAlpha : releaseAlpha;
-        compGain = a * compGain + (1.0f - a) * targetGain;
+        const float a = alphaFromMsBlock (needDown ? attackMs : releaseMs, numSamples);
 
+        compGain = a * compGain + (1.0f - a) * targetGain;
         return compGain;
     }
 
 private:
-    float alphaFromMs (float ms) const
+    // alpha correcto cuando actualizas 1 vez por BLOQUE (no por sample)
+    float alphaFromMsBlock (float ms, int numSamples) const
     {
-        const float tau = juce::jmax (1.0e-4f, ms * 0.001f);
-        return std::exp (-1.0f / (tau * (float) sr));
+        const float tau = juce::jmax (1.0e-4f, ms * 0.001f);      // segundos
+        const float dt  = (float) numSamples / (float) sr;        // segundos por bloque
+        return std::exp (-dt / tau);
     }
 
     double sr = 48000.0;
@@ -266,11 +274,11 @@ private:
 
     float gatePow = juce::Decibels::decibelsToGain (-65.0f) * juce::Decibels::decibelsToGain (-65.0f);
 
-    float attackAlpha  = 0.999f;
-    float releaseAlpha = 0.9995f;
-    float returnAlpha  = 0.9999f;
+    float attackMs  = 4.0f;
+    float releaseMs = 80.0f;
+    float returnMs  = 500.0f;
 
-    float compGain = 1.0f;
+    float compGain   = 1.0f;
     float targetGain = 1.0f;
 };
 
