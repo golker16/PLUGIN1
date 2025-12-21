@@ -70,7 +70,8 @@ struct KnobLNF : public juce::LookAndFeel_V4
         const auto emptyCol = slider.findColour (juce::Slider::rotarySliderOutlineColourId);
         const auto fillCol  = slider.findColour (juce::Slider::rotarySliderFillColourId);
 
-        const float thickness = juce::jmax (4.0f, radius * 0.18f);
+        // ✅ más minimal (sin manecilla) y un poco más fino
+        const float thickness = juce::jmax (2.0f, radius * 0.12f);
 
         juce::Path bgArc;
         bgArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f,
@@ -90,16 +91,7 @@ struct KnobLNF : public juce::LookAndFeel_V4
                                                       juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
 
-        // indicador
-        juce::Path p;
-        const float pointerLength    = radius * 0.65f;
-        const float pointerThickness = juce::jmax (2.0f, radius * 0.10f);
-        p.addRectangle (-pointerThickness * 0.5f, -radius,
-                        pointerThickness, pointerLength);
-
-        g.setColour (juce::Colours::white.withAlpha (0.9f));
-        g.fillPath (p, juce::AffineTransform::rotation (angle)
-                           .translated (centre.x, centre.y));
+        // ✅ manecilla eliminada -> solo vacío + relleno
     }
 };
 
@@ -140,10 +132,26 @@ public:
         const int sx = frameIndex * frameW;
         const int sy = 0;
 
-        const auto b = getLocalBounds();
+        // ✅ Fit centrado manteniendo aspect ratio (sin estirar)
+        auto b = getLocalBounds().toFloat();
+
+        const float ar = (float) frameW / (float) frameH;
+
+        float dw = b.getWidth();
+        float dh = dw / ar;
+
+        if (dh > b.getHeight())
+        {
+            dh = b.getHeight();
+            dw = dh * ar;
+        }
+
+        const float dx = b.getX() + (b.getWidth()  - dw) * 0.5f;
+        const float dy = b.getY() + (b.getHeight() - dh) * 0.5f;
+
         g.drawImage (sheet,
-                     b.getX(), b.getY(), b.getWidth(), b.getHeight(),
-                     sx, sy, frameW, frameH);
+                     dx, dy, dw, dh,
+                     (float) sx, (float) sy, (float) frameW, (float) frameH);
     }
 
 private:
@@ -237,7 +245,11 @@ public:
        #if PLUGIN_HAS_ASSETS
         modelImg = juce::ImageCache::getFromMemory (BinaryData::model_png, BinaryData::model_pngSize);
         modelImage.setImage (modelImg);
-        modelImage.setImagePlacement (juce::RectanglePlacement::centred);
+
+        // ✅ mantener AR + centrar + solo reducir (no agrandar / no deformar)
+        modelImage.setImagePlacement (juce::RectanglePlacement::centred
+                                    | juce::RectanglePlacement::onlyReduceInSize);
+
         addAndMakeVisible (modelImage);
        #endif
 
@@ -270,9 +282,9 @@ public:
     {
         auto area = getLocalBounds().reduced (44);
 
-        // --- Header animado arriba ---
-        auto headerArea = area.removeFromTop (96);
-        header.setBounds (headerArea.reduced (6, 6));
+        // --- Header animado arriba (banner centrado) ---
+        auto headerArea = area.removeFromTop (96).reduced (6, 6);
+        header.setBounds (headerArea);
 
         // Aire entre header y knobs
         area.removeFromTop (16);
@@ -280,26 +292,25 @@ public:
         // Barra inferior (selector Preamp)
         auto bottom = area.removeFromBottom (74);
 
-        // --- Layout knobs (3 columnas centradas) ---
-        const int knobW = 120;   // componente LabeledKnob (slider interno aún más pequeño)
-        const int knobH = 132;
-        const int gap   = 120;   // separación grande para “aire” general
+        // --- Layout knobs (pequeños, pegados y a la izquierda) ---
+        const int knobW = 90;     // componente LabeledKnob
+        const int knobH = 104;
+        const int gap   = 8;      // arrimados
 
-        const int totalW = (knobW * 3) + (gap * 2);
-        const int startX = area.getX() + juce::jmax (0, (area.getWidth() - totalW) / 2);
-        const int y      = area.getY() + 10;
+        const int startX = area.getX();   // pegado a la izquierda
+        const int y      = area.getY();   // arriba del bloque de knobs
 
-        driveKnob.setBounds (startX,                     y, knobW, knobH);
-        toneKnob .setBounds (startX + knobW + gap,       y, knobW, knobH);
-        mixKnob  .setBounds (startX + (knobW + gap) * 2, y, knobW, knobH);
+        driveKnob.setBounds (startX,                         y, knobW, knobH);
+        toneKnob .setBounds (startX + knobW + gap,           y, knobW, knobH);
+        mixKnob  .setBounds (startX + (knobW + gap) * 2,     y, knobW, knobH);
 
         // --- Bottom row: [model.png] [ComboBox] ---
         bottom.reduce (0, 10);
 
-        auto left = bottom.removeFromLeft (170);
+        auto left = bottom.removeFromLeft (90); // ✅ más pequeño
        #if PLUGIN_HAS_ASSETS
         if (modelImg.isValid())
-            modelImage.setBounds (left.reduced (10, 2));
+            modelImage.setBounds (left.reduced (6, 10));
        #endif
 
         preampBox.setBounds (bottom.reduced (0, 12));
