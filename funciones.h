@@ -317,17 +317,17 @@ struct SimpleKnobLookAndFeel : juce::LookAndFeel_V4
     }
 };
 
-// ✅ Nuevo LabeledKnob: permite PNG encima del knob sin romper lo actual
+// ✅ LabeledKnob: permite PNG encima del knob sin romper lo actual
 struct LabeledKnob : juce::Component
 {
     juce::Label  label;
     juce::Slider slider;
 
-    // ✅ imagen opcional como "label" encima del knob
+    // imagen opcional como "label" encima del knob
     juce::Image labelImage;
     juce::ImageComponent imageComp;
 
-    // ✅ NUEVO: alturas configurables por instancia
+    // ✅ 2.1: alturas configurables por instancia
     int pngTopH  = 16;
     int textTopH = 14;
 
@@ -337,7 +337,7 @@ struct LabeledKnob : juce::Component
         label.setJustificationType (juce::Justification::centred);
         label.setInterceptsMouseClicks (false, false);
 
-        // ✅ fallback label más pequeño si no hay PNG
+        // fallback label más pequeño si no hay PNG
         label.setFont (juce::Font (9.0f));
 
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -352,16 +352,16 @@ struct LabeledKnob : juce::Component
         addAndMakeVisible (slider);
     }
 
-    // ✅ NUEVO: set por instancia para hacer drive/mix más chicos y tone más grande
+    // ✅ 2.1: setter para controlar alto del "slot" por knob
     void setLabelSlotHeights (int pngTop, int textTop)
     {
-        pngTopH  = juce::jlimit (8, 48, pngTop);
-        textTopH = juce::jlimit (8, 48, textTop);
+        pngTopH  = juce::jlimit (6, 48, pngTop);   // mínimo 6 (más chico)
+        textTopH = juce::jlimit (6, 48, textTop);
         resized();
         repaint();
     }
 
-    // Llama a esto para poner un PNG encima del knob
+    // Pone un PNG encima del knob
     void setLabelImage (juce::Image img)
     {
         labelImage = img;
@@ -372,7 +372,6 @@ struct LabeledKnob : juce::Component
 
         if (hasImg)
         {
-            // ✅ no deformar, centrar, y solo reducir si el espacio es chico
             imageComp.setImage (labelImage);
             imageComp.setImagePlacement (juce::RectanglePlacement::centred
                                        | juce::RectanglePlacement::onlyReduceInSize);
@@ -390,21 +389,16 @@ struct LabeledKnob : juce::Component
     {
         auto r = getLocalBounds();
 
-        // ✅ AHORA usa tamaños configurables
+        // ✅ 2.1: usa tamaños configurables
         const int topH = imageComp.isVisible() ? pngTopH : textTopH;
 
         if (imageComp.isVisible())
-        {
-            // más “mini” y centrado
             imageComp.setBounds (r.removeFromTop (topH).reduced (1, 2));
-        }
         else
-        {
             label.setBounds (r.removeFromTop (topH));
-        }
 
-        // knob más pequeño (slider interno más reducido)
-        slider.setBounds (r.reduced (12, 10));
+        // ✅ 2.2: slider interno más chico (moderado y consistente)
+        slider.setBounds (r.reduced (16, 14));
     }
 };
 } // namespace ui
