@@ -140,7 +140,8 @@ public:
         float dw = b.getWidth();
         float dh = dw / ar;
 
-        if (dh > b.getHeight())
+        // ✅ COVER: si queda bajo, llenamos alto (puede recortar)
+        if (dh < b.getHeight())
         {
             dh = b.getHeight();
             dw = dh * ar;
@@ -307,10 +308,11 @@ public:
         // --- Bottom row: [model.png] [ComboBox] ---
         bottom.reduce (0, 10);
 
-        auto left = bottom.removeFromLeft (90); // ✅ más pequeño
+        // ✅ model.png muchísimo más chico
+        auto left = bottom.removeFromLeft (60);
        #if PLUGIN_HAS_ASSETS
         if (modelImg.isValid())
-            modelImage.setBounds (left.reduced (6, 10));
+            modelImage.setBounds (left.reduced (4, 16));
        #endif
 
         preampBox.setBounds (bottom.reduced (0, 12));
@@ -679,3 +681,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
