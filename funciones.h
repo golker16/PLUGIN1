@@ -183,11 +183,19 @@ private:
 };
 
 //==============================================================================
-// AutoGainExact (v2): match RMS "percibido" (HP) por bloque entre ENTRADA y SALIDA.
+// AutoGainExact (v3 ULTRA): iguala "volumen percibido" (RMS con HP) por MUESTRA.
 //
-// Objetivo: que el volumen NO cambie aunque cambien Drive/Tone/Mix/Preset.
-// - Se mide una versión filtrada (HP) de la señal para evitar que subgraves/DC engañen.
-// - Se ajusta una ganancia compensatoria con attack/release por BLOQUE.
+// Objetivo: que el volumen se mantenga constante al mover cualquier knob, incluso con
+// tamaños de buffer variables (FL Studio, etc.). Este modo NO depende del block-size:
+// - Mide potencia (HP) de ENTRADA (dry alineado) y SALIDA (mixed PRE gain).
+// - Mantiene envs RMS (EMA) con ventana configurable (ms).
+// - Calcula targetGain = sqrt(inEnv/outEnv) con gate + clamp.
+// - Suaviza la ganancia con attack/release por muestra.
+// - Cuando no hay señal útil, vuelve lentamente a unity.
+//
+// Nota importante:
+//   La medición de salida debe hacerse ANTES de aplicar la ganancia compensatoria
+//   para evitar "auto-cancelación".
 class AutoGainExact
 {
 public:
@@ -195,25 +203,32 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-        // Para distorsión casi siempre quieres atenuar mucho y subir poquito.
-        // Para que REALMENTE no suba/baje al mover knobs, necesitas permitir más rango.
-        // (Si lo dejas en +6 dB, cualquier preset/drive que suba más que eso jamás se compensará.)
-        setClampDb (-60.0f, +18.0f);
-        setGateDb  (-70.0f);
+        // Rango amplio para que realmente compense presets/drive agresivos
+        setClampDb (-60.0f, +24.0f);
+        setGateDb  (-80.0f);
 
-        // Responde rápido a picos/subidas (baja), y más lento al recuperar (sube).
-        setSmoothingMs      (2.5f, 140.0f);
-        setReturnToUnityMs  (650.0f);
+        // Ventana de medición (RMS EMA). Más grande = más estable; más chica = más reactivo.
+        setMeasurementWindowMs (240.0f);
 
-        // Medición: HP para que DC/subgrave no engañe, pero no tan alto que ignore el cuerpo.
-        // 60 Hz suele dar un "volumen percibido" más estable cuando mueves Tone.
-        setMeasureHighpassHz (60.0f);
+        // Suavizado de la GANANCIA (no de la medición):
+        // - attack: cuando necesita bajar (evita picos al subir drive)
+        // - release: cuando necesita subir (evita bombeo)
+        setGainSmoothingMs (1.0f, 180.0f);
+
+        // Vuelve a unity en silencio
+        setReturnToUnityMs (700.0f);
+
+        // HP para no dejar que DC/subgrave dicte el autogain
+        setMeasureHighpassHz (70.0f);
 
         reset();
     }
 
     void reset()
     {
+        inEnv  = 0.0f;
+        outEnv = 0.0f;
+
         compGain   = 1.0f;
         targetGain = 1.0f;
 
@@ -223,13 +238,46 @@ public:
         out_hp_y1[0] = out_hp_y1[1] = 0.0f;
     }
 
-    // Ganancia actual (la que debes aplicar al audio en este bloque)
     float getGain() const noexcept { return compGain; }
 
-    // Medición por muestra (HP) con estados separados para entrada y salida
-    inline float measureIn (float x, int ch) noexcept  { return measureHP (x, ch, in_hp_x1,  in_hp_y1);  }
-    inline float measureOut (float x, int ch) noexcept { return measureHP (x, ch, out_hp_x1, out_hp_y1); }
+    // Procesa una muestra estéreo y devuelve la ganancia ACTUAL (ya suavizada)
+    inline float processStereo (float dryL, float dryR, float outLpre, float outRpre) noexcept
+    {
+        const float inL  = measureHP (dryL,    0, in_hp_x1,  in_hp_y1);
+        const float inR  = measureHP (dryR,    1, in_hp_x1,  in_hp_y1);
+        const float outL = measureHP (outLpre, 0, out_hp_x1, out_hp_y1);
+        const float outR = measureHP (outRpre, 1, out_hp_x1, out_hp_y1);
 
+        const float pIn  = 0.5f * (inL  * inL  + inR  * inR);
+        const float pOut = 0.5f * (outL * outL + outR * outR);
+
+        // RMS envs
+        inEnv  = measAlpha * inEnv  + (1.0f - measAlpha) * pIn;
+        outEnv = measAlpha * outEnv + (1.0f - measAlpha) * pOut;
+
+        const bool gateOk = (inEnv > gatePow) && (outEnv > gatePow);
+
+        if (gateOk)
+        {
+            const float ratio = inEnv / (outEnv + 1.0e-20f);
+            float g = std::sqrt (ratio);
+            g = juce::jlimit (minGain, maxGain, g);
+            targetGain = g;
+        }
+        else
+        {
+            // vuelve a unity cuando no hay señal útil
+            targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
+        }
+
+        const bool needDown = (targetGain < compGain);
+        const float a = needDown ? gainAttackAlpha : gainReleaseAlpha;
+        compGain = a * compGain + (1.0f - a) * targetGain;
+
+        return compGain;
+    }
+
+    // --- ajustes ---
     void setClampDb (float minDb, float maxDb)
     {
         minGain = juce::Decibels::decibelsToGain (minDb);
@@ -242,15 +290,21 @@ public:
         gatePow = gateLin * gateLin;
     }
 
-    void setSmoothingMs (float newAttackMs, float newReleaseMs)
+    void setMeasurementWindowMs (float ms)
     {
-        attackMs  = juce::jmax (0.1f, newAttackMs);
-        releaseMs = juce::jmax (0.1f, newReleaseMs);
+        const float tau = juce::jmax (1.0e-4f, ms * 0.001f);
+        measAlpha = std::exp (-1.0f / (tau * (float) sr));
+    }
+
+    void setGainSmoothingMs (float attackMs, float releaseMs)
+    {
+        gainAttackAlpha  = alphaFromMsSample (attackMs);
+        gainReleaseAlpha = alphaFromMsSample (releaseMs);
     }
 
     void setReturnToUnityMs (float ms)
     {
-        returnMs = juce::jmax (1.0f, ms);
+        returnAlpha = alphaFromMsSample (ms);
     }
 
     void setMeasureHighpassHz (float hz)
@@ -259,43 +313,11 @@ public:
         hpA = std::exp (-2.0f * juce::MathConstants<float>::pi * (fc / (float) sr));
     }
 
-    // Actualiza la ganancia para el PRÓXIMO bloque.
-    // inPow/outPow deben venir ya promediadas (potencia media del bloque).
-    float updateFromBlockPowers (double inPow, double outPow, int numSamples)
-    {
-        numSamples = juce::jmax (1, numSamples);
-
-        const bool gateOk = (inPow > (double) gatePow) && (outPow > (double) gatePow);
-
-        if (gateOk)
-        {
-            const double ratio = inPow / (outPow + 1.0e-20);
-            float g = (float) std::sqrt (ratio);
-
-            g = juce::jlimit (minGain, maxGain, g);
-            targetGain = g;
-        }
-        else
-        {
-            // vuelve a 1.0 suavemente cuando no hay señal útil
-            const float aRet = alphaFromMsBlock (returnMs, numSamples);
-            targetGain = aRet * targetGain + (1.0f - aRet) * 1.0f;
-        }
-
-        const bool needDown = (targetGain < compGain);
-        const float a = alphaFromMsBlock (needDown ? attackMs : releaseMs, numSamples);
-
-        compGain = a * compGain + (1.0f - a) * targetGain;
-        return compGain;
-    }
-
 private:
-    // alpha correcto cuando actualizas 1 vez por BLOQUE (no por sample)
-    float alphaFromMsBlock (float ms, int numSamples) const
+    inline float alphaFromMsSample (float ms) const noexcept
     {
-        const float tau = juce::jmax (1.0e-4f, ms * 0.001f);      // segundos
-        const float dt  = (float) numSamples / (float) sr;        // segundos por bloque
-        return std::exp (-dt / tau);
+        const float tau = juce::jmax (1.0e-4f, ms * 0.001f);
+        return std::exp (-1.0f / (tau * (float) sr));
     }
 
     inline float measureHP (float x, int ch, float* x1, float* y1) noexcept
@@ -309,25 +331,29 @@ private:
 
     double sr = 48000.0;
 
-    float minGain = juce::Decibels::decibelsToGain (-48.0f);
-    float maxGain = juce::Decibels::decibelsToGain (+6.0f);
+    float minGain = juce::Decibels::decibelsToGain (-60.0f);
+    float maxGain = juce::Decibels::decibelsToGain (+24.0f);
 
-    float gatePow = juce::Decibels::decibelsToGain (-70.0f) * juce::Decibels::decibelsToGain (-70.0f);
+    float gatePow = juce::Decibels::decibelsToGain (-80.0f) * juce::Decibels::decibelsToGain (-80.0f);
 
-    float attackMs  = 2.5f;
-    float releaseMs = 140.0f;
-    float returnMs  = 650.0f;
-
-    float compGain   = 1.0f;
-    float targetGain = 1.0f;
-
-    // HP states separados para entrada/salida
     float hpA = 0.98f;
     float in_hp_x1[2]  = { 0.0f, 0.0f };
     float in_hp_y1[2]  = { 0.0f, 0.0f };
     float out_hp_x1[2] = { 0.0f, 0.0f };
     float out_hp_y1[2] = { 0.0f, 0.0f };
+
+    float measAlpha = 0.999f;
+    float inEnv  = 0.0f;
+    float outEnv = 0.0f;
+
+    float gainAttackAlpha  = 0.99f;
+    float gainReleaseAlpha = 0.9995f;
+    float returnAlpha      = 0.9999f;
+
+    float compGain   = 1.0f;
+    float targetGain = 1.0f;
 };
+
 
 //==============================================================================
 // UI helpers
@@ -459,4 +485,5 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
+
 
