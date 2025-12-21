@@ -183,7 +183,11 @@ private:
 };
 
 //==============================================================================
-// AutoGainExact: match RMS por bloque (dry vs mixed) + clamp + smoothing (correcto por BLOQUE).
+// AutoGainExact (v2): match RMS "percibido" (HP) por bloque entre ENTRADA y SALIDA.
+//
+// Objetivo: que el volumen NO cambie aunque cambien Drive/Tone/Mix/Preset.
+// - Se mide una versión filtrada (HP) de la señal para evitar que subgraves/DC engañen.
+// - Se ajusta una ganancia compensatoria con attack/release por BLOQUE.
 class AutoGainExact
 {
 public:
@@ -191,11 +195,17 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-        setClampDb (-12.0f, +12.0f);
-        setGateDb  (-65.0f);
+        // Para distorsión casi siempre quieres atenuar mucho y subir poquito.
+        // Si quieres aún más "constante", puedes bajar minDb a -60 dB.
+        setClampDb (-48.0f, +6.0f);
+        setGateDb  (-70.0f);
 
-        setSmoothingMs      (4.0f, 80.0f);   // baja rápido, sube suave
-        setReturnToUnityMs  (500.0f);
+        // Responde rápido a picos/subidas (baja), y más lento al recuperar (sube).
+        setSmoothingMs      (2.5f, 140.0f);
+        setReturnToUnityMs  (650.0f);
+
+        // Medición: highpass para no sobre-compensar por low end.
+        setMeasureHighpassHz (120.0f);
 
         reset();
     }
@@ -204,7 +214,19 @@ public:
     {
         compGain   = 1.0f;
         targetGain = 1.0f;
+
+        in_hp_x1[0] = in_hp_x1[1] = 0.0f;
+        in_hp_y1[0] = in_hp_y1[1] = 0.0f;
+        out_hp_x1[0] = out_hp_x1[1] = 0.0f;
+        out_hp_y1[0] = out_hp_y1[1] = 0.0f;
     }
+
+    // Ganancia actual (la que debes aplicar al audio en este bloque)
+    float getGain() const noexcept { return compGain; }
+
+    // Medición por muestra (HP) con estados separados para entrada y salida
+    inline float measureIn (float x, int ch) noexcept  { return measureHP (x, ch, in_hp_x1,  in_hp_y1);  }
+    inline float measureOut (float x, int ch) noexcept { return measureHP (x, ch, out_hp_x1, out_hp_y1); }
 
     void setClampDb (float minDb, float maxDb)
     {
@@ -229,16 +251,23 @@ public:
         returnMs = juce::jmax (1.0f, ms);
     }
 
-    // 🔥 CAMBIO CLAVE: ahora recibe numSamples para que el smoothing sea correcto por bloque
-    float updateFromBlockPowers (double dryPow, double mixedPow, int numSamples)
+    void setMeasureHighpassHz (float hz)
+    {
+        const float fc = juce::jlimit (5.0f, 1000.0f, hz);
+        hpA = std::exp (-2.0f * juce::MathConstants<float>::pi * (fc / (float) sr));
+    }
+
+    // Actualiza la ganancia para el PRÓXIMO bloque.
+    // inPow/outPow deben venir ya promediadas (potencia media del bloque).
+    float updateFromBlockPowers (double inPow, double outPow, int numSamples)
     {
         numSamples = juce::jmax (1, numSamples);
 
-        const bool gateOk = (dryPow > (double) gatePow) && (mixedPow > (double) gatePow);
+        const bool gateOk = (inPow > (double) gatePow) && (outPow > (double) gatePow);
 
         if (gateOk)
         {
-            const double ratio = dryPow / (mixedPow + 1.0e-20);
+            const double ratio = inPow / (outPow + 1.0e-20);
             float g = (float) std::sqrt (ratio);
 
             g = juce::jlimit (minGain, maxGain, g);
@@ -267,19 +296,35 @@ private:
         return std::exp (-dt / tau);
     }
 
+    inline float measureHP (float x, int ch, float* x1, float* y1) noexcept
+    {
+        // 1-pole HP: y[n] = a*(y[n-1] + x[n] - x[n-1])
+        const float y = hpA * (y1[ch] + x - x1[ch]);
+        x1[ch] = x;
+        y1[ch] = y;
+        return y;
+    }
+
     double sr = 48000.0;
 
-    float minGain = juce::Decibels::decibelsToGain (-12.0f);
-    float maxGain = juce::Decibels::decibelsToGain (+12.0f);
+    float minGain = juce::Decibels::decibelsToGain (-48.0f);
+    float maxGain = juce::Decibels::decibelsToGain (+6.0f);
 
-    float gatePow = juce::Decibels::decibelsToGain (-65.0f) * juce::Decibels::decibelsToGain (-65.0f);
+    float gatePow = juce::Decibels::decibelsToGain (-70.0f) * juce::Decibels::decibelsToGain (-70.0f);
 
-    float attackMs  = 4.0f;
-    float releaseMs = 80.0f;
-    float returnMs  = 500.0f;
+    float attackMs  = 2.5f;
+    float releaseMs = 140.0f;
+    float returnMs  = 650.0f;
 
     float compGain   = 1.0f;
     float targetGain = 1.0f;
+
+    // HP states separados para entrada/salida
+    float hpA = 0.98f;
+    float in_hp_x1[2]  = { 0.0f, 0.0f };
+    float in_hp_y1[2]  = { 0.0f, 0.0f };
+    float out_hp_x1[2] = { 0.0f, 0.0f };
+    float out_hp_y1[2] = { 0.0f, 0.0f };
 };
 
 //==============================================================================
