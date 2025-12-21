@@ -70,18 +70,23 @@ if(NOT EXISTS "${PLUGIN_ASSETS_DIR}")
   message(FATAL_ERROR "No existe PLUGIN_ASSETS_DIR: '${PLUGIN_ASSETS_DIR}'")
 endif()
 
-# 2) Lista contenido (clave para saber si CI realmente tiene los png)
+# 2) Lista contenido (CI debug) SIN cmake -E ls (no existe en Windows CMake 3.31)
 message(STATUS "Listando contenido de assets (CI debug):")
-execute_process(
-  COMMAND ${CMAKE_COMMAND} -E ls "${PLUGIN_ASSETS_DIR}"
-  RESULT_VARIABLE _ls_res
-  OUTPUT_VARIABLE _ls_out
-  ERROR_VARIABLE  _ls_err
+
+file(GLOB _ASSET_DEBUG_LIST
+  RELATIVE "${PLUGIN_ASSETS_DIR}"
+  "${PLUGIN_ASSETS_DIR}/*"
 )
-message(STATUS "${_ls_out}")
-if(NOT _ls_res EQUAL 0)
-  message(WARNING "cmake -E ls falló: ${_ls_err}")
+
+if(_ASSET_DEBUG_LIST)
+  foreach(_f IN LISTS _ASSET_DEBUG_LIST)
+    message(STATUS "  - ${_f}")
+  endforeach()
+else()
+  message(STATUS "  (vacío)")
 endif()
+
+unset(_ASSET_DEBUG_LIST)
 
 # 3) Glob robusto (incluye .png y .PNG, y reconfigura si cambian archivos)
 file(GLOB_RECURSE PLUGIN_ASSET_PNGS
