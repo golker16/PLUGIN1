@@ -1,8 +1,6 @@
 #include "PluginProcessor.h"
 #include <cstring> // std::memset
 
-//------------------------------------------------------------------------------
-// Si CMake no define PLUGIN_HAS_ASSETS por alguna razón, no rompas el build:
 #ifndef PLUGIN_HAS_ASSETS
  #define PLUGIN_HAS_ASSETS 0
 #endif
@@ -52,6 +50,50 @@ namespace
 class MinimalEditor final : public juce::AudioProcessorEditor
 {
 public:
+    // LookAndFeel propio para poder usar colores por-slider (vacío/lleno)
+    struct KnobLNF : public juce::LookAndFeel_V4
+    {
+        void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                               float sliderPosProportional,
+                               float rotaryStartAngle, float rotaryEndAngle,
+                               juce::Slider& slider) override
+        {
+            auto bounds = juce::Rectangle<float>((float)x, (float)y, (float)width, (float)height)
+                            .reduced(6.0f);
+
+            auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f;
+            auto centre = bounds.getCentre();
+
+            auto angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
+
+            auto emptyCol = slider.findColour(juce::Slider::rotarySliderOutlineColourId);
+            auto fillCol  = slider.findColour(juce::Slider::rotarySliderFillColourId);
+
+            auto thickness = juce::jmax(4.0f, radius * 0.18f);
+
+            juce::Path bgArc;
+            bgArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f, rotaryStartAngle, rotaryEndAngle, true);
+
+            g.setColour(emptyCol);
+            g.strokePath(bgArc, juce::PathStrokeType(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+            juce::Path valueArc;
+            valueArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f, rotaryStartAngle, angle, true);
+
+            g.setColour(fillCol);
+            g.strokePath(valueArc, juce::PathStrokeType(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+            juce::Path p;
+            auto pointerLength = radius * 0.65f;
+            auto pointerThickness = juce::jmax(2.0f, radius * 0.10f);
+            p.addRectangle(-pointerThickness * 0.5f, -radius, pointerThickness, pointerLength);
+
+            g.setColour(juce::Colours::white.withAlpha(0.9f));
+            g.fillPath(p, juce::AffineTransform::rotation(angle).translated(centre.x, centre.y));
+        }
+    };
+
+public:
     explicit MinimalEditor (YourPluginAudioProcessor& proc)
         : juce::AudioProcessorEditor (&proc)
         , processor (proc)
@@ -59,12 +101,25 @@ public:
         , toneKnob  ("Tone")
         , mixKnob   ("Mix")
     {
-        lnf.trackColour = juce::Colour::fromRGB (45, 45, 45);
-        lnf.valueColour = juce::Colour::fromRGB (90, 255, 130);
+        // LookAndFeel por-knob (colores por slider)
+        knobLNF = std::make_unique<KnobLNF>();
 
-        driveKnob.slider.setLookAndFeel (&lnf);
-        toneKnob .slider.setLookAndFeel (&lnf);
-        mixKnob  .slider.setLookAndFeel (&lnf);
+        driveKnob.slider.setLookAndFeel (knobLNF.get());
+        toneKnob .slider.setLookAndFeel (knobLNF.get());
+        mixKnob  .slider.setLookAndFeel (knobLNF.get());
+
+        // ✅ Colores por knob (AARRGGBB)
+        // DRIVE: vacío 006700, lleno 65ff65
+        driveKnob.slider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString("FF006700"));
+        driveKnob.slider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString("FF65FF65"));
+
+        // TONE: vacío f9ff34, lleno cc66ff
+        toneKnob.slider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString("FFF9FF34"));
+        toneKnob.slider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString("FFCC66FF"));
+
+        // MIX: vacío 555555, lleno ffffff
+        mixKnob.slider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString("FF555555"));
+        mixKnob.slider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString("FFFFFFFF"));
 
         addAndMakeVisible (driveKnob);
         addAndMakeVisible (toneKnob);
@@ -77,10 +132,8 @@ public:
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
        #endif
 
-        preampLabel.setText ("Preamp:", juce::dontSendNotification);
-        preampLabel.setJustificationType (juce::Justification::centredLeft);
-        preampLabel.setInterceptsMouseClicks (false, false);
-
+        // ✅ Quitamos el texto "Preamp:" y lo reemplazamos por model.png
+        // (mantenemos el ComboBox para que siga existiendo el control del preset)
         preampBox.setJustificationType (juce::Justification::centredLeft);
 
         int itemId = 1;
@@ -90,8 +143,14 @@ public:
         if (preampBox.getNumItems() == 0)
             preampBox.addItem ("(none)", 1);
 
-        addAndMakeVisible (preampLabel);
         addAndMakeVisible (preampBox);
+
+       #if PLUGIN_HAS_ASSETS
+        modelImg = juce::ImageCache::getFromMemory (BinaryData::model_png, BinaryData::model_pngSize);
+        modelImage.setImage (modelImg);
+        modelImage.setImagePlacement (juce::RectanglePlacement::centred);
+        addAndMakeVisible (modelImage);
+       #endif
 
         using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
         using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
@@ -101,8 +160,8 @@ public:
         mixAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
         preampAtt = std::make_unique<ComboBoxAttachment> (processor.apvts, "preamp", preampBox);
 
-        // ✅ UI más grande
-        setSize (540, 270);
+        // ✅ Ventana MÁS grande para “más espacio vacío general”
+        setSize (780, 420);
     }
 
     ~MinimalEditor() override
@@ -110,6 +169,7 @@ public:
         driveKnob.slider.setLookAndFeel (nullptr);
         toneKnob .slider.setLookAndFeel (nullptr);
         mixKnob  .slider.setLookAndFeel (nullptr);
+        knobLNF.reset();
     }
 
     void paint (juce::Graphics& g) override
@@ -117,36 +177,64 @@ public:
         g.fillAll (juce::Colours::black);
     }
 
-    // ✅ Más padding + knobs más pequeños + más espacio abajo
+    // ✅ Más padding + knobs más pequeños + más aire general
     void resized() override
     {
-        auto r = getLocalBounds().reduced (18);
+        // Más “aire” general
+        auto r = getLocalBounds().reduced (34);
 
-        auto topRow = r.removeFromTop (185);
-        const int w = topRow.getWidth() / 3;
-
-        driveKnob.setBounds (topRow.removeFromLeft (w).reduced (18));
-        toneKnob .setBounds (topRow.removeFromLeft (w).reduced (18));
-        mixKnob  .setBounds (topRow.removeFromLeft (w).reduced (18));
-
+        // Aire arriba/abajo
         r.removeFromTop (10);
+        r.removeFromBottom (10);
 
-        auto bottom = r.removeFromTop (36);
-        preampLabel.setBounds (bottom.removeFromLeft (80));
-        preampBox  .setBounds (bottom.reduced (0, 4));
+        // Top: knobs (más chicos)
+        auto topRow = r.removeFromTop (260);
+
+        const int totalW = topRow.getWidth();
+        const int wEach  = totalW / 3;
+
+        // Área para cada knob (lo hacemos más pequeño dejando margen)
+        auto a1 = topRow.removeFromLeft (wEach);
+        auto a2 = topRow.removeFromLeft (wEach);
+        auto a3 = topRow.removeFromLeft (wEach);
+
+        // Aquí se define el “knob más chico”: más padding interno
+        driveKnob.setBounds (a1.reduced (42, 34));
+        toneKnob .setBounds (a2.reduced (42, 34));
+        mixKnob  .setBounds (a3.reduced (42, 34));
+
+        // Espacio entre knobs y zona inferior
+        r.removeFromTop (22);
+
+        // Bottom: imagen (model) + combo
+        auto bottom = r.removeFromTop (72);
+
+        // Izquierda: model.png (donde antes iba el label "Preamp:")
+        auto leftBox = bottom.removeFromLeft (140);
+
+       #if PLUGIN_HAS_ASSETS
+        modelImage.setBounds (leftBox.reduced (6));
+       #endif
+
+        // Derecha: ComboBox del preset
+        preampBox.setBounds (bottom.reduced (0, 16));
     }
 
 private:
     YourPluginAudioProcessor& processor;
 
-    plugin::ui::SimpleKnobLookAndFeel lnf;
+    std::unique_ptr<KnobLNF> knobLNF;
 
     plugin::ui::LabeledKnob driveKnob;
     plugin::ui::LabeledKnob toneKnob;
     plugin::ui::LabeledKnob mixKnob;
 
-    juce::Label preampLabel;
     juce::ComboBox preampBox;
+
+   #if PLUGIN_HAS_ASSETS
+    juce::ImageComponent modelImage;
+    juce::Image modelImg;
+   #endif
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> driveAtt, toneAtt, mixAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> preampAtt;
@@ -194,7 +282,7 @@ juce::AudioProcessorEditor* YourPluginAudioProcessor::createEditor()
 
 //==============================================================================
 // Layout
-bool YourPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+bool YourPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const override
 {
     const auto& in  = layouts.getMainInputChannelSet();
     const auto& out = layouts.getMainOutputChannelSet();
@@ -249,7 +337,6 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 {
     sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-    // Smoothing 20ms
     driveSm.reset (sr, 0.02);
     toneSm .reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
@@ -258,7 +345,6 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .setCurrentAndTargetValue (*pTone);
     mixSm  .setCurrentAndTargetValue (*pMix);
 
-    // Inicializa coef pointers (evita null)
     lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     lowShelfR.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
@@ -266,37 +352,30 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     updateTiltCoeffs (*pTone);
 
-    // ✅ AutoGain EXACTO por bloque (dry vs mixed)
     autoGain.prepare (sr);
 
-    // Oversampling (solo para WET)
     const auto channels = (size_t) juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
     oversampling = std::make_unique<juce::dsp::Oversampling<float>> (
         channels,
         kOversamplingExponent,
         juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true /* max quality */);
+        true);
 
     oversampling->reset();
     oversampling->initProcessing ((size_t) samplesPerBlock);
     setLatencySamples ((int) oversampling->getLatencyInSamples());
 
-    // buffers
     wetBuffer.setSize ((int) juce::jmax ((size_t)1, juce::jmin ((size_t)2, channels)),
                        samplesPerBlock, false, false, true);
 
-    // sample rate interno del preset (oversampled) - NO hardcode
     const float osFactor = (float) (1u << kOversamplingExponent);
     osSr = (float) (sr * osFactor);
 
-    // ✅ A) Preparar módulo de interacción estéreo PRO al SR oversampled
     stereoInteract.prepare (osSr);
 
-    // Limpia storage de estados
     for (auto& st : presetState)
         std::memset (&st, 0, sizeof(st));
 
-    // ---- PRESET inicial (blindado) ----
     activePresetIndex = -1;
     activePreset = nullptr;
 
@@ -338,7 +417,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     toneSm .setTargetValue (*pTone);
     mixSm  .setTargetValue (*pMix);
 
-    // Selección de preset
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
@@ -352,7 +430,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float osFactor = (float) (1u << kOversamplingExponent);
         osSr = (float) (sr * osFactor);
 
-        // ✅ Mantén stereoInteract alineado si cambia SR/OS (o si rearmas oversampling)
         stereoInteract.prepare (osSr);
 
         for (int ch = 0; ch < 2; ++ch)
@@ -363,12 +440,10 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         }
     }
 
-    // Tone smoothing real (por bloque) antes de usar tilt
     toneSm.setTargetValue (*pTone);
     toneSm.skip (numSamples);
     updateTiltCoeffs (toneSm.getCurrentValue());
 
-    // Asegura wetBuffer sin realocar cada bloque
     const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
     if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < numSamples)
         wetBuffer.setSize (wetCh, numSamples, false, false, true);
@@ -376,8 +451,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* wetL = wetBuffer.getWritePointer (0);
     auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
-    // -------------------------------------------------------------------------
-    // 1) WET base SR: pregain + tilt
     for (int i = 0; i < numSamples; ++i)
     {
         const float drive01 = driveSm.getNextValue();
@@ -397,13 +470,9 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 2) Oversampling -> preset PRO (stateful) -> downsample
     if (oversampling != nullptr && activePreset != nullptr && activePreset->process != nullptr)
     {
         juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
-
-        // procesamos SOLO numSamples (aunque wetBuffer sea más grande)
         baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
 
         auto osBlock = oversampling->processSamplesUp (baseBlock);
@@ -411,7 +480,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const size_t osSamples = osBlock.getNumSamples();
         const size_t osCh = osBlock.getNumChannels();
 
-        // ✅ B) Loop por muestra con interacción estéreo PRO (si osCh == 2)
         if (osCh == 2)
         {
             float* L = osBlock.getChannelPointer (0);
@@ -446,8 +514,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         oversampling->processSamplesDown (baseBlock);
     }
 
-    // -------------------------------------------------------------------------
-    // 3) Mix (primera pasada) + cálculo de energía por bloque
     double dryPow   = 0.0;
     double mixedPow = 0.0;
 
@@ -479,7 +545,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const float g = autoGain.updateFromBlockPowers (dryPow, mixedPow);
 
-    // Segunda pasada: aplicar gain + softclip
     for (int i = 0; i < numSamples; ++i)
     {
         ch0[i] = plugin::softClipSafety (ch0[i] * g);
@@ -493,5 +558,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
 
