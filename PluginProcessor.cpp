@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include <cstring> // std::memset
 
+//------------------------------------------------------------------------------
+// Si CMake no define PLUGIN_HAS_ASSETS por alguna razón, no rompas el build:
 #ifndef PLUGIN_HAS_ASSETS
  #define PLUGIN_HAS_ASSETS 0
 #endif
@@ -47,52 +49,123 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 
 namespace
 {
-class MinimalEditor final : public juce::AudioProcessorEditor
+//------------------------------------------------------------------------------
+// Per-knob LookAndFeel: usa colours del Slider para (vacío/lleno)
+struct KnobLNF : public juce::LookAndFeel_V4
+{
+    void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                           float sliderPosProportional,
+                           float rotaryStartAngle, float rotaryEndAngle,
+                           juce::Slider& slider) override
+    {
+        auto bounds = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height)
+                        .reduced (6.0f);
+
+        const float radius = juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.5f;
+        const auto centre  = bounds.getCentre();
+
+        const float angle = rotaryStartAngle
+                          + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
+
+        const auto emptyCol = slider.findColour (juce::Slider::rotarySliderOutlineColourId);
+        const auto fillCol  = slider.findColour (juce::Slider::rotarySliderFillColourId);
+
+        const float thickness = juce::jmax (4.0f, radius * 0.18f);
+
+        juce::Path bgArc;
+        bgArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f,
+                             rotaryStartAngle, rotaryEndAngle, true);
+
+        g.setColour (emptyCol);
+        g.strokePath (bgArc, juce::PathStrokeType (thickness,
+                                                   juce::PathStrokeType::curved,
+                                                   juce::PathStrokeType::rounded));
+
+        juce::Path valueArc;
+        valueArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f,
+                                rotaryStartAngle, angle, true);
+
+        g.setColour (fillCol);
+        g.strokePath (valueArc, juce::PathStrokeType (thickness,
+                                                      juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+
+        // indicador
+        juce::Path p;
+        const float pointerLength    = radius * 0.65f;
+        const float pointerThickness = juce::jmax (2.0f, radius * 0.10f);
+        p.addRectangle (-pointerThickness * 0.5f, -radius,
+                        pointerThickness, pointerLength);
+
+        g.setColour (juce::Colours::white.withAlpha (0.9f));
+        g.fillPath (p, juce::AffineTransform::rotation (angle)
+                           .translated (centre.x, centre.y));
+    }
+};
+
+//------------------------------------------------------------------------------
+// Animated header from sprite sheet (assets/header_sheet.png)
+// - 45 frames (horizontal strip)
+// - 3 fps (very light for plugins)
+class AnimatedHeader final : public juce::Component,
+                             private juce::Timer
 {
 public:
-    // LookAndFeel propio para poder usar colores por-slider (vacío/lleno)
-    struct KnobLNF : public juce::LookAndFeel_V4
+    void setSpriteSheet (juce::Image sheetImage, int framesInRow, int fps)
     {
-        void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
-                               float sliderPosProportional,
-                               float rotaryStartAngle, float rotaryEndAngle,
-                               juce::Slider& slider) override
+        sheet = sheetImage;
+        numFrames = juce::jmax (1, framesInRow);
+        frameIndex = 0;
+
+        if (! sheet.isValid() || sheet.getWidth() <= 0 || sheet.getHeight() <= 0)
         {
-            auto bounds = juce::Rectangle<float>((float)x, (float)y, (float)width, (float)height)
-                            .reduced(6.0f);
-
-            auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f;
-            auto centre = bounds.getCentre();
-
-            auto angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
-
-            auto emptyCol = slider.findColour(juce::Slider::rotarySliderOutlineColourId);
-            auto fillCol  = slider.findColour(juce::Slider::rotarySliderFillColourId);
-
-            auto thickness = juce::jmax(4.0f, radius * 0.18f);
-
-            juce::Path bgArc;
-            bgArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f, rotaryStartAngle, rotaryEndAngle, true);
-
-            g.setColour(emptyCol);
-            g.strokePath(bgArc, juce::PathStrokeType(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-            juce::Path valueArc;
-            valueArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f, rotaryStartAngle, angle, true);
-
-            g.setColour(fillCol);
-            g.strokePath(valueArc, juce::PathStrokeType(thickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-            juce::Path p;
-            auto pointerLength = radius * 0.65f;
-            auto pointerThickness = juce::jmax(2.0f, radius * 0.10f);
-            p.addRectangle(-pointerThickness * 0.5f, -radius, pointerThickness, pointerLength);
-
-            g.setColour(juce::Colours::white.withAlpha(0.9f));
-            g.fillPath(p, juce::AffineTransform::rotation(angle).translated(centre.x, centre.y));
+            stopTimer();
+            return;
         }
-    };
 
+        frameW = juce::jmax (1, sheet.getWidth() / numFrames);
+        frameH = juce::jmax (1, sheet.getHeight());
+
+        startTimerHz (juce::jmax (1, fps));
+        repaint();
+    }
+
+    void stop() { stopTimer(); }
+
+    void paint (juce::Graphics& g) override
+    {
+        if (! sheet.isValid() || numFrames <= 0 || frameW <= 0 || frameH <= 0)
+            return;
+
+        const int sx = frameIndex * frameW;
+        const int sy = 0;
+
+        const auto b = getLocalBounds();
+        g.drawImage (sheet,
+                     b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+                     sx, sy, frameW, frameH);
+    }
+
+private:
+    void timerCallback() override
+    {
+        if (! sheet.isValid())
+            return;
+
+        frameIndex = (frameIndex + 1) % numFrames;
+        repaint();
+    }
+
+    juce::Image sheet;
+    int numFrames  = 1;
+    int frameIndex = 0;
+    int frameW = 0;
+    int frameH = 0;
+};
+
+//------------------------------------------------------------------------------
+class MinimalEditor final : public juce::AudioProcessorEditor
+{
 public:
     explicit MinimalEditor (YourPluginAudioProcessor& proc)
         : juce::AudioProcessorEditor (&proc)
@@ -101,29 +174,46 @@ public:
         , toneKnob  ("Tone")
         , mixKnob   ("Mix")
     {
-        // LookAndFeel por-knob (colores por slider)
-        knobLNF = std::make_unique<KnobLNF>();
+        // LookAndFeel per knob (colores por slider)
+        driveKnob.slider.setLookAndFeel (&knobLNF);
+        toneKnob .slider.setLookAndFeel (&knobLNF);
+        mixKnob  .slider.setLookAndFeel (&knobLNF);
 
-        driveKnob.slider.setLookAndFeel (knobLNF.get());
-        toneKnob .slider.setLookAndFeel (knobLNF.get());
-        mixKnob  .slider.setLookAndFeel (knobLNF.get());
-
-        // ✅ Colores por knob (AARRGGBB)
+        // ✅ Colores (AARRGGBB)
         // DRIVE: vacío 006700, lleno 65ff65
-        driveKnob.slider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString("FF006700"));
-        driveKnob.slider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString("FF65FF65"));
+        driveKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF006700"));
+        driveKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FF65FF65"));
 
         // TONE: vacío f9ff34, lleno cc66ff
-        toneKnob.slider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString("FFF9FF34"));
-        toneKnob.slider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString("FFCC66FF"));
+        toneKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FFF9FF34"));
+        toneKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFCC66FF"));
 
         // MIX: vacío 555555, lleno ffffff
-        mixKnob.slider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString("FF555555"));
-        mixKnob.slider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString("FFFFFFFF"));
+        mixKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF555555"));
+        mixKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF"));
+
+        // Labels más pequeños (por si compilas sin PNGs)
+        driveKnob.label.setFont (juce::Font (11.0f));
+        toneKnob .label.setFont (juce::Font (11.0f));
+        mixKnob  .label.setFont (juce::Font (11.0f));
 
         addAndMakeVisible (driveKnob);
         addAndMakeVisible (toneKnob);
         addAndMakeVisible (mixKnob);
+
+        addAndMakeVisible (header);
+
+       #if PLUGIN_HAS_ASSETS
+        // header_sheet.png -> sprite sheet animado (45 frames, 3 fps)
+        {
+            int dataSize = 0;
+            if (auto* data = BinaryData::getNamedResource ("header_sheet_png", dataSize))
+            {
+                auto sheet = juce::ImageCache::getFromMemory (data, dataSize);
+                header.setSpriteSheet (sheet, 45, 3);
+            }
+        }
+       #endif
 
         // ✅ PNG encima de knobs (desde /assets -> BinaryData) SOLO si existe
        #if PLUGIN_HAS_ASSETS
@@ -132,8 +222,7 @@ public:
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
        #endif
 
-        // ✅ Quitamos el texto "Preamp:" y lo reemplazamos por model.png
-        // (mantenemos el ComboBox para que siga existiendo el control del preset)
+        // ComboBox presets (mantiene el control)
         preampBox.setJustificationType (juce::Justification::centredLeft);
 
         int itemId = 1;
@@ -160,16 +249,16 @@ public:
         mixAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
         preampAtt = std::make_unique<ComboBoxAttachment> (processor.apvts, "preamp", preampBox);
 
-        // ✅ Ventana MÁS grande para “más espacio vacío general”
-        setSize (780, 420);
+        // ✅ UI más grande
+        setSize (820, 460);
     }
 
     ~MinimalEditor() override
     {
+        header.stop();
         driveKnob.slider.setLookAndFeel (nullptr);
         toneKnob .slider.setLookAndFeel (nullptr);
         mixKnob  .slider.setLookAndFeel (nullptr);
-        knobLNF.reset();
     }
 
     void paint (juce::Graphics& g) override
@@ -177,53 +266,51 @@ public:
         g.fillAll (juce::Colours::black);
     }
 
-    // ✅ Más padding + knobs más pequeños + más aire general
     void resized() override
     {
-        // Más “aire” general
-        auto r = getLocalBounds().reduced (34);
+        auto area = getLocalBounds().reduced (44);
 
-        // Aire arriba/abajo
-        r.removeFromTop (10);
-        r.removeFromBottom (10);
+        // --- Header animado arriba ---
+        auto headerArea = area.removeFromTop (96);
+        header.setBounds (headerArea.reduced (6, 6));
 
-        // Top: knobs (más chicos)
-        auto topRow = r.removeFromTop (260);
+        // Aire entre header y knobs
+        area.removeFromTop (16);
 
-        const int totalW = topRow.getWidth();
-        const int wEach  = totalW / 3;
+        // Barra inferior (selector Preamp)
+        auto bottom = area.removeFromBottom (74);
 
-        // Área para cada knob (lo hacemos más pequeño dejando margen)
-        auto a1 = topRow.removeFromLeft (wEach);
-        auto a2 = topRow.removeFromLeft (wEach);
-        auto a3 = topRow.removeFromLeft (wEach);
+        // --- Layout knobs (3 columnas centradas) ---
+        const int knobW = 120;   // componente LabeledKnob (slider interno aún más pequeño)
+        const int knobH = 132;
+        const int gap   = 120;   // separación grande para “aire” general
 
-        // Aquí se define el “knob más chico”: más padding interno
-        driveKnob.setBounds (a1.reduced (42, 34));
-        toneKnob .setBounds (a2.reduced (42, 34));
-        mixKnob  .setBounds (a3.reduced (42, 34));
+        const int totalW = (knobW * 3) + (gap * 2);
+        const int startX = area.getX() + juce::jmax (0, (area.getWidth() - totalW) / 2);
+        const int y      = area.getY() + 10;
 
-        // Espacio entre knobs y zona inferior
-        r.removeFromTop (22);
+        driveKnob.setBounds (startX,                     y, knobW, knobH);
+        toneKnob .setBounds (startX + knobW + gap,       y, knobW, knobH);
+        mixKnob  .setBounds (startX + (knobW + gap) * 2, y, knobW, knobH);
 
-        // Bottom: imagen (model) + combo
-        auto bottom = r.removeFromTop (72);
+        // --- Bottom row: [model.png] [ComboBox] ---
+        bottom.reduce (0, 10);
 
-        // Izquierda: model.png (donde antes iba el label "Preamp:")
-        auto leftBox = bottom.removeFromLeft (140);
-
+        auto left = bottom.removeFromLeft (170);
        #if PLUGIN_HAS_ASSETS
-        modelImage.setBounds (leftBox.reduced (6));
+        if (modelImg.isValid())
+            modelImage.setBounds (left.reduced (10, 2));
        #endif
 
-        // Derecha: ComboBox del preset
-        preampBox.setBounds (bottom.reduced (0, 16));
+        preampBox.setBounds (bottom.reduced (0, 12));
     }
 
 private:
     YourPluginAudioProcessor& processor;
 
-    std::unique_ptr<KnobLNF> knobLNF;
+    KnobLNF knobLNF;
+
+    AnimatedHeader header;
 
     plugin::ui::LabeledKnob driveKnob;
     plugin::ui::LabeledKnob toneKnob;
@@ -282,7 +369,7 @@ juce::AudioProcessorEditor* YourPluginAudioProcessor::createEditor()
 
 //==============================================================================
 // Layout
-bool YourPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const override
+bool YourPluginAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto& in  = layouts.getMainInputChannelSet();
     const auto& out = layouts.getMainOutputChannelSet();
@@ -337,6 +424,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 {
     sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
+    // Smoothing 20ms
     driveSm.reset (sr, 0.02);
     toneSm .reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
@@ -345,6 +433,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .setCurrentAndTargetValue (*pTone);
     mixSm  .setCurrentAndTargetValue (*pMix);
 
+    // Inicializa coef pointers (evita null)
     lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     lowShelfR.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
@@ -352,30 +441,37 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     updateTiltCoeffs (*pTone);
 
+    // ✅ AutoGain EXACTO por bloque (dry vs mixed)
     autoGain.prepare (sr);
 
+    // Oversampling (solo para WET)
     const auto channels = (size_t) juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
     oversampling = std::make_unique<juce::dsp::Oversampling<float>> (
         channels,
         kOversamplingExponent,
         juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true);
+        true /* max quality */);
 
     oversampling->reset();
     oversampling->initProcessing ((size_t) samplesPerBlock);
     setLatencySamples ((int) oversampling->getLatencyInSamples());
 
+    // buffers
     wetBuffer.setSize ((int) juce::jmax ((size_t)1, juce::jmin ((size_t)2, channels)),
                        samplesPerBlock, false, false, true);
 
+    // sample rate interno del preset (oversampled) - NO hardcode
     const float osFactor = (float) (1u << kOversamplingExponent);
     osSr = (float) (sr * osFactor);
 
+    // ✅ A) Preparar módulo de interacción estéreo PRO al SR oversampled
     stereoInteract.prepare (osSr);
 
+    // Limpia storage de estados
     for (auto& st : presetState)
         std::memset (&st, 0, sizeof(st));
 
+    // ---- PRESET inicial (blindado) ----
     activePresetIndex = -1;
     activePreset = nullptr;
 
@@ -417,6 +513,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     toneSm .setTargetValue (*pTone);
     mixSm  .setTargetValue (*pMix);
 
+    // Selección de preset
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
@@ -430,6 +527,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float osFactor = (float) (1u << kOversamplingExponent);
         osSr = (float) (sr * osFactor);
 
+        // ✅ Mantén stereoInteract alineado si cambia SR/OS (o si rearmas oversampling)
         stereoInteract.prepare (osSr);
 
         for (int ch = 0; ch < 2; ++ch)
@@ -440,10 +538,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         }
     }
 
+    // Tone smoothing real (por bloque) antes de usar tilt
     toneSm.setTargetValue (*pTone);
     toneSm.skip (numSamples);
     updateTiltCoeffs (toneSm.getCurrentValue());
 
+    // Asegura wetBuffer sin realocar cada bloque
     const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
     if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < numSamples)
         wetBuffer.setSize (wetCh, numSamples, false, false, true);
@@ -451,6 +551,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* wetL = wetBuffer.getWritePointer (0);
     auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
+    // -------------------------------------------------------------------------
+    // 1) WET base SR: pregain + tilt
     for (int i = 0; i < numSamples; ++i)
     {
         const float drive01 = driveSm.getNextValue();
@@ -470,9 +572,13 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         }
     }
 
+    // -------------------------------------------------------------------------
+    // 2) Oversampling -> preset PRO (stateful) -> downsample
     if (oversampling != nullptr && activePreset != nullptr && activePreset->process != nullptr)
     {
         juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
+
+        // procesamos SOLO numSamples (aunque wetBuffer sea más grande)
         baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
 
         auto osBlock = oversampling->processSamplesUp (baseBlock);
@@ -480,6 +586,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const size_t osSamples = osBlock.getNumSamples();
         const size_t osCh = osBlock.getNumChannels();
 
+        // ✅ B) Loop por muestra con interacción estéreo PRO (si osCh == 2)
         if (osCh == 2)
         {
             float* L = osBlock.getChannelPointer (0);
@@ -514,6 +621,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         oversampling->processSamplesDown (baseBlock);
     }
 
+    // -------------------------------------------------------------------------
+    // 3) Mix (primera pasada) + cálculo de energía por bloque
     double dryPow   = 0.0;
     double mixedPow = 0.0;
 
@@ -545,6 +654,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const float g = autoGain.updateFromBlockPowers (dryPow, mixedPow);
 
+    // Segunda pasada: aplicar gain + softclip
     for (int i = 0; i < numSamples; ++i)
     {
         ch0[i] = plugin::softClipSafety (ch0[i] * g);
@@ -558,4 +668,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
