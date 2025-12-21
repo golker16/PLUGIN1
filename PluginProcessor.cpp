@@ -478,7 +478,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     updateTiltCoeffs (*pTone);
 
-
+    // ✅ AutoGain por bloque (entrada alineada vs salida real) para volumen constante
     autoGain.prepare (sr);
 
     // Oversampling (solo para WET)
@@ -667,9 +667,16 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // -------------------------------------------------------------------------
-    // 3) Mix (primera pasada) + cálculo de energía por bloque
-    double dryPow   = 0.0;
-    double mixedPow = 0.0;
+    // 3) Mix + AUTO-LEVEL (volumen constante)
+    //
+    // IMPORTANTE:
+    // - Aplicamos la ganancia del autoGain (del bloque ANTERIOR) y el softClipSafety aquí mismo.
+    // - Medimos potencia (filtrada HP) en ENTRADA alineada (dryDelay) vs SALIDA real (post-gain + post-softclip)
+    //   para ajustar la ganancia del PRÓXIMO bloque.
+    double inPow  = 0.0;
+    double outPow = 0.0;
+
+    const float gNow = autoGain.getGain();
 
     // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
     auto* dL = dryDelayBuffer.getWritePointer (0);
@@ -708,27 +715,31 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        ch0[i] = mixedL;
-        if (ch1 != nullptr) ch1[i] = mixedR;
+        // Salida real (la que escucha el usuario): post auto-level + safety clip
+        const float outL = plugin::softClipSafety (mixedL * gNow);
+        const float outR = plugin::softClipSafety (mixedR * gNow);
 
-        const double dP = 0.5 * (double(dryL)   * double(dryL)   + double(dryR)   * double(dryR));
-        const double mP = 0.5 * (double(mixedL) * double(mixedL) + double(mixedR) * double(mixedR));
+        ch0[i] = outL;
+        if (ch1 != nullptr) ch1[i] = outR;
 
-        dryPow   += dP;
-        mixedPow += mP;
+        // Medición filtrada (HP) para que el low-end no "engañe" el autogain.
+        const float inML  = autoGain.measureIn  (dryL, 0);
+        const float inMR  = autoGain.measureIn  (dryR, 1);
+        const float outML = autoGain.measureOut (outL, 0);
+        const float outMR = autoGain.measureOut (outR, 1);
+
+        const double pIn  = 0.5 * (double (inML)  * double (inML)  + double (inMR)  * double (inMR));
+        const double pOut = 0.5 * (double (outML) * double (outML) + double (outMR) * double (outMR));
+
+        inPow  += pIn;
+        outPow += pOut;
     }
 
-    dryPow   /= (double) juce::jmax (1, numSamples);
-    mixedPow /= (double) juce::jmax (1, numSamples);
+    inPow  /= (double) juce::jmax (1, numSamples);
+    outPow /= (double) juce::jmax (1, numSamples);
 
-    const float g = autoGain.updateFromBlockPowers (dryPow, mixedPow, numSamples);
-
-    // Segunda pasada: aplicar gain + softclip
-    for (int i = 0; i < numSamples; ++i)
-    {
-        ch0[i] = plugin::softClipSafety (ch0[i] * g);
-        if (ch1 != nullptr) ch1[i] = plugin::softClipSafety (ch1[i] * g);
-    }
+    // Actualiza la ganancia para el siguiente bloque.
+    (void) autoGain.updateFromBlockPowers (inPow, outPow, numSamples);
 }
 
 //==============================================================================
