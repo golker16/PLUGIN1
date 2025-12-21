@@ -58,11 +58,19 @@ struct KnobLNF : public juce::LookAndFeel_V4
                            float rotaryStartAngle, float rotaryEndAngle,
                            juce::Slider& slider) override
     {
-        auto bounds = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height)
-                        .reduced (6.0f);
+        // ✅ 1.5: ruedita a la mitad pero conservar grosor actual
+        auto outer = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height)
+                       .reduced (6.0f);
+
+        // radio base para mantener grosor como antes (basado en área grande)
+        const float baseRadius = juce::jmin (outer.getWidth(), outer.getHeight()) * 0.5f;
+
+        // ruedita a la mitad (centrada)
+        auto bounds = outer.withSizeKeepingCentre (outer.getWidth() * 0.5f,
+                                                   outer.getHeight() * 0.5f);
 
         const float radius = juce::jmin (bounds.getWidth(), bounds.getHeight()) * 0.5f;
-        const auto centre  = bounds.getCentre();
+        const auto  centre = bounds.getCentre();
 
         const float angle = rotaryStartAngle
                           + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
@@ -70,8 +78,8 @@ struct KnobLNF : public juce::LookAndFeel_V4
         const auto emptyCol = slider.findColour (juce::Slider::rotarySliderOutlineColourId);
         const auto fillCol  = slider.findColour (juce::Slider::rotarySliderFillColourId);
 
-        // ✅ más minimal (sin manecilla) y un poco más fino
-        const float thickness = juce::jmax (2.0f, radius * 0.12f);
+        // grosor conservado (usa baseRadius, no radius chico)
+        const float thickness = juce::jmax (2.0f, baseRadius * 0.12f);
 
         juce::Path bgArc;
         bgArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f,
@@ -132,19 +140,30 @@ public:
         const int sx = frameIndex * frameW;
         const int sy = 0;
 
-        // ✅ Fit centrado manteniendo aspect ratio (sin estirar)
+        // ✅ 1.1: "contain" + ONLY REDUCE (no agrandar) + centrado
         auto b = getLocalBounds().toFloat();
 
         const float ar = (float) frameW / (float) frameH;
 
+        // tamaño nativo del frame (en pixels)
+        const float nativeW = (float) frameW;
+        const float nativeH = (float) frameH;
+
+        // 1) contain dentro del componente
         float dw = b.getWidth();
         float dh = dw / ar;
 
-        // ✅ COVER: si queda bajo, llenamos alto (puede recortar)
-        if (dh < b.getHeight())
+        if (dh > b.getHeight())
         {
             dh = b.getHeight();
             dw = dh * ar;
+        }
+
+        // 2) onlyReduceInSize: si el componente es más grande, NO escales hacia arriba
+        if (dw > nativeW || dh > nativeH)
+        {
+            dw = nativeW;
+            dh = nativeH;
         }
 
         const float dx = b.getX() + (b.getWidth()  - dw) * 0.5f;
@@ -229,6 +248,11 @@ public:
         driveKnob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::drive_png, BinaryData::drive_pngSize));
         toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
+
+        // ✅ 1.4: tamaños diferentes del slot de PNG por knob
+        driveKnob.setLabelSlotHeights (12, 14); // más chico aún
+        mixKnob  .setLabelSlotHeights (12, 14); // más chico aún
+        toneKnob .setLabelSlotHeights (20, 14); // un poco más grande
        #endif
 
         // ComboBox presets (mantiene el control)
@@ -283,8 +307,8 @@ public:
     {
         auto area = getLocalBounds().reduced (44);
 
-        // --- Header animado arriba (banner centrado) ---
-        auto headerArea = area.removeFromTop (96).reduced (6, 6);
+        // ✅ 1.2: Header con menos altura
+        auto headerArea = area.removeFromTop (72).reduced (6, 6);
         header.setBounds (headerArea);
 
         // Aire entre header y knobs
@@ -308,11 +332,11 @@ public:
         // --- Bottom row: [model.png] [ComboBox] ---
         bottom.reduce (0, 10);
 
-        // ✅ model.png muchísimo más chico
-        auto left = bottom.removeFromLeft (60);
+        // ✅ 1.3: model.png mucho más chico
+        auto left = bottom.removeFromLeft (44);
        #if PLUGIN_HAS_ASSETS
         if (modelImg.isValid())
-            modelImage.setBounds (left.reduced (4, 16));
+            modelImage.setBounds (left.reduced (2, 18));
        #endif
 
         preampBox.setBounds (bottom.reduced (0, 12));
@@ -681,4 +705,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
