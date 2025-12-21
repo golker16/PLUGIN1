@@ -184,8 +184,6 @@ private:
 
 //==============================================================================
 // AutoGainExact: match RMS por bloque (dry vs mixed) + clamp + smoothing.
-// - "Exacto" en el sentido de RMS/energía: mover Drive/Tone/Mix no cambia nivel.
-// - Gate: si hay silencio, no persigue ruido (return-to-unity).
 class AutoGainExact
 {
 public:
@@ -230,8 +228,6 @@ public:
         returnAlpha = alphaFromMs (ms);
     }
 
-    // Calcula/actualiza el gain desde energía por bloque.
-    // dryPow / mixedPow son POTENCIAS medias (o sumas, ratio es el mismo).
     float updateFromBlockPowers (double dryPow, double mixedPow)
     {
         const bool gateOk = (dryPow > (double) gatePow) && (mixedPow > (double) gatePow);
@@ -246,11 +242,9 @@ public:
         }
         else
         {
-            // sin señal -> vuelve lento a unity
             targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
         }
 
-        // smoothing: si baja, ataque; si sube, release
         const bool needDown = (targetGain < compGain);
         const float a = needDown ? attackAlpha : releaseAlpha;
         compGain = a * compGain + (1.0f - a) * targetGain;
@@ -329,9 +323,13 @@ struct LabeledKnob : juce::Component
     juce::Label  label;
     juce::Slider slider;
 
-    // ✅ Nuevo: imagen opcional como "label" encima del knob
+    // ✅ imagen opcional como "label" encima del knob
     juce::Image labelImage;
     juce::ImageComponent imageComp;
+
+    // ✅ NUEVO: alturas configurables por instancia
+    int pngTopH  = 16;
+    int textTopH = 14;
 
     explicit LabeledKnob (const juce::String& name)
     {
@@ -339,7 +337,7 @@ struct LabeledKnob : juce::Component
         label.setJustificationType (juce::Justification::centred);
         label.setInterceptsMouseClicks (false, false);
 
-        // ✅ (E) fallback label más pequeño si no hay PNG
+        // ✅ fallback label más pequeño si no hay PNG
         label.setFont (juce::Font (9.0f));
 
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -354,6 +352,15 @@ struct LabeledKnob : juce::Component
         addAndMakeVisible (slider);
     }
 
+    // ✅ NUEVO: set por instancia para hacer drive/mix más chicos y tone más grande
+    void setLabelSlotHeights (int pngTop, int textTop)
+    {
+        pngTopH  = juce::jlimit (8, 48, pngTop);
+        textTopH = juce::jlimit (8, 48, textTop);
+        resized();
+        repaint();
+    }
+
     // Llama a esto para poner un PNG encima del knob
     void setLabelImage (juce::Image img)
     {
@@ -365,7 +372,7 @@ struct LabeledKnob : juce::Component
 
         if (hasImg)
         {
-            // ✅ (A) no deformar, centrar, y solo reducir si el espacio es chico
+            // ✅ no deformar, centrar, y solo reducir si el espacio es chico
             imageComp.setImage (labelImage);
             imageComp.setImagePlacement (juce::RectanglePlacement::centred
                                        | juce::RectanglePlacement::onlyReduceInSize);
@@ -383,12 +390,12 @@ struct LabeledKnob : juce::Component
     {
         auto r = getLocalBounds();
 
-        // ✅ (B) slot superior más pequeño (PNG o texto)
-        const int topH = imageComp.isVisible() ? 16 : 14;
+        // ✅ AHORA usa tamaños configurables
+        const int topH = imageComp.isVisible() ? pngTopH : textTopH;
 
         if (imageComp.isVisible())
         {
-            // ✅ (D) más “mini” y centrado
+            // más “mini” y centrado
             imageComp.setBounds (r.removeFromTop (topH).reduced (1, 2));
         }
         else
@@ -396,7 +403,7 @@ struct LabeledKnob : juce::Component
             label.setBounds (r.removeFromTop (topH));
         }
 
-        // ✅ (C) knob más pequeño (slider interno más reducido)
+        // knob más pequeño (slider interno más reducido)
         slider.setBounds (r.reduced (12, 10));
     }
 };
