@@ -481,6 +481,9 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     // ✅ AutoGain por bloque (entrada alineada vs salida real) para volumen constante
     autoGain.prepare (sr);
 
+    // Guardar block size inicial (si el host luego usa uno mayor, creceremos buffers/OS)
+    maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
+
     // Oversampling (solo para WET)
     const auto channels = (size_t) juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
     oversampling = std::make_unique<juce::dsp::Oversampling<float>> (
@@ -490,20 +493,20 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
         true /* max quality */);
 
     oversampling->reset();
-    oversampling->initProcessing ((size_t) samplesPerBlock);
+    oversampling->initProcessing ((size_t) maxBlockSizePrepared);
     setLatencySamples ((int) oversampling->getLatencyInSamples());
 
     // ✅ 3.2) Inicializar dry delay justo después de setLatencySamples(...)
     dryDelaySamples    = (int) oversampling->getLatencyInSamples();
     dryDelayWritePos   = 0;
-    dryDelayBufferSize = samplesPerBlock + dryDelaySamples + 1;
+    dryDelayBufferSize = maxBlockSizePrepared + dryDelaySamples + 1;
 
     dryDelayBuffer.setSize ((int) channels, dryDelayBufferSize, false, false, true);
     dryDelayBuffer.clear();
 
     // buffers
     wetBuffer.setSize ((int) juce::jmax ((size_t)1, juce::jmin ((size_t)2, channels)),
-                       samplesPerBlock, false, false, true);
+                       maxBlockSizePrepared, false, false, true);
 
     // sample rate interno del preset (oversampled) - NO hardcode
     const float osFactor = (float) (1u << kOversamplingExponent);
@@ -547,6 +550,25 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const int numCh = buffer.getNumChannels();
     const int numSamples = buffer.getNumSamples();
+
+    // FL Studio y otros hosts pueden variar el block size. Si crece,
+    // re-inicializamos oversampling y buffers para evitar desalineaciones.
+    if (numSamples > maxBlockSizePrepared)
+    {
+        maxBlockSizePrepared = numSamples;
+        if (oversampling != nullptr)
+            oversampling->initProcessing ((size_t) maxBlockSizePrepared);
+
+        // crecer wetBuffer (pre OS)
+        const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
+        wetBuffer.setSize (wetCh, maxBlockSizePrepared, false, false, true);
+
+        // crecer delay para DRY alineado
+        dryDelayBufferSize = maxBlockSizePrepared + dryDelaySamples + 1;
+        dryDelayBuffer.setSize (wetCh, dryDelayBufferSize, false, false, true);
+        dryDelayBuffer.clear();
+        dryDelayWritePos = 0;
+    }
 
     for (int ch = 2; ch < numCh; ++ch)
         buffer.clear (ch, 0, numSamples);
@@ -670,13 +692,17 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     // 3) Mix + AUTO-LEVEL (volumen constante)
     //
     // IMPORTANTE:
-    // - Aplicamos la ganancia del autoGain (del bloque ANTERIOR) y el softClipSafety aquí mismo.
-    // - Medimos potencia (filtrada HP) en ENTRADA alineada (dryDelay) vs SALIDA real (post-gain + post-softclip)
-    //   para ajustar la ganancia del PRÓXIMO bloque.
+    // - Medimos potencia (filtrada HP) en ENTRADA alineada (dryDelay) vs SALIDA *PRE* autoGain.
+    // - Luego calculamos la ganancia OBJETIVO para ESTE bloque y la aplicamos con una rampa
+    //   (de gStart -> gEnd) + softClipSafety.
+    //
+    // ⚠️ Importante: si mides la salida DESPUÉS de aplicar la ganancia compensatoria, el ratio
+    // tiende a 1 y el autogain “se cancela” (se vuelve hacia 1.0 aunque el nivel real haya cambiado).
     double inPow  = 0.0;
     double outPow = 0.0;
 
-    const float gNow = autoGain.getGain();
+    // Ganancia al inicio del bloque (la del bloque anterior)
+    const float gStart = autoGain.getGain();
 
     // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
     auto* dL = dryDelayBuffer.getWritePointer (0);
@@ -684,6 +710,9 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const int size = dryDelayBuffer.getNumSamples();
 
+    // 1) Primer pase: crear la señal MIXED (pre autogain), y medir potencias.
+    //    Es MUCHO más estable (y "se siente" inmediato al mover knobs) que aplicar una
+    //    ganancia calculada con 1 bloque de retraso.
     for (int i = 0; i < numSamples; ++i)
     {
         const float mix01 = mixSm.getNextValue();
@@ -715,18 +744,16 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        // Salida real (la que escucha el usuario): post auto-level + safety clip
-        const float outL = plugin::softClipSafety (mixedL * gNow);
-        const float outR = plugin::softClipSafety (mixedR * gNow);
-
-        ch0[i] = outL;
-        if (ch1 != nullptr) ch1[i] = outR;
+        // Guardamos temporalmente la salida PRE-autogain en el buffer principal.
+        ch0[i] = mixedL;
+        if (ch1 != nullptr) ch1[i] = mixedR;
 
         // Medición filtrada (HP) para que el low-end no "engañe" el autogain.
+        // ✅ OJO: medimos la salida ANTES de aplicar autogain.
         const float inML  = autoGain.measureIn  (dryL, 0);
         const float inMR  = autoGain.measureIn  (dryR, 1);
-        const float outML = autoGain.measureOut (outL, 0);
-        const float outMR = autoGain.measureOut (outR, 1);
+        const float outML = autoGain.measureOut (mixedL, 0);
+        const float outMR = autoGain.measureOut (mixedR, 1);
 
         const double pIn  = 0.5 * (double (inML)  * double (inML)  + double (inMR)  * double (inMR));
         const double pOut = 0.5 * (double (outML) * double (outML) + double (outMR) * double (outMR));
@@ -738,8 +765,23 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     inPow  /= (double) juce::jmax (1, numSamples);
     outPow /= (double) juce::jmax (1, numSamples);
 
-    // Actualiza la ganancia para el siguiente bloque.
-    (void) autoGain.updateFromBlockPowers (inPow, outPow, numSamples);
+    // 2) Actualiza ganancia en base a ESTE bloque.
+    const float gEnd = autoGain.updateFromBlockPowers (inPow, outPow, numSamples);
+
+    // 3) Segundo pase: aplicar ganancia con rampa + safety clip (evita clicks al mover knobs).
+    if (numSamples > 0)
+    {
+        float g = gStart;
+        const float dg = (numSamples > 1) ? ((gEnd - gStart) / (float) (numSamples - 1)) : 0.0f;
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            ch0[i] = plugin::softClipSafety (ch0[i] * g);
+            if (ch1 != nullptr)
+                ch1[i] = plugin::softClipSafety (ch1[i] * g);
+            g += dg;
+        }
+    }
 }
 
 //==============================================================================
