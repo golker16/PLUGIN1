@@ -478,7 +478,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     updateTiltCoeffs (*pTone);
 
-    // ✅ AutoGain EXACTO por bloque (dry vs mixed)
+
     autoGain.prepare (sr);
 
     // Oversampling (solo para WET)
