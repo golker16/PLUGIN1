@@ -14,8 +14,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           lfs: true
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show assets directory
+        shell: pwsh
+        run: |
+          Write-Host "Contenido de assets:"
+          Get-ChildItem -Path ".\assets" -Force | Format-Table -AutoSize
 
       - name: Configure (CMake, VS2022 x64 Release)
         run: >
@@ -68,6 +75,7 @@ jobs:
         with:
           name: PluginSaturador1-vst3-windows
           path: dist/PluginSaturador1-vst3-windows.zip
+
 
 
     
