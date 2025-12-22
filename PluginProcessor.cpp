@@ -543,10 +543,18 @@ void YourPluginAudioProcessor::rebuildOversampling (int newExponent)
 
     osExponent = juce::jlimit (1, 3, newExponent);
 
-    // Elegimos filtros según modo (más CPU/menos aliasing a mayor calidad)
+    // Elegimos filtros según modo (más CPU/menos aliasing a mayor calidad).
+    // OJO: algunos builds de JUCE no exponen `filterHalfBandFIR`, pero sí:
+    //  - filterHalfBandPolyphaseIIR
+    //  - filterHalfBandPolyphaseFIR
+    //  - filterHalfBandFIREquiripple
+    // Mapeo recomendado:
+    //   Eco    (2x) -> IIR (ligero)
+    //   HQ     (4x) -> Polyphase FIR (mejor stopband)
+    //   Insane (8x) -> FIR equiripple (máxima calidad)
     juce::dsp::Oversampling<float>::FilterType type = juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR;
     if (osExponent == 2)
-        type = juce::dsp::Oversampling<float>::filterHalfBandFIR;
+        type = juce::dsp::Oversampling<float>::filterHalfBandPolyphaseFIR;
     else if (osExponent >= 3)
         type = juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple;
 
