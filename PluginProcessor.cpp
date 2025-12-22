@@ -166,6 +166,15 @@ public:
     {
         // Carga Typeface embebida (si existe).
         typeface = plugin::ui::getEmbeddedPluginTypeface();
+
+        // UI: fondos negros para ComboBox + PopupMenu (recuadros y menús desplegables)
+        setColour (juce::ComboBox::backgroundColourId, juce::Colours::black);
+        setColour (juce::ComboBox::textColourId,       juce::Colours::white);
+        setColour (juce::ComboBox::arrowColourId,      juce::Colours::white);
+        setColour (juce::PopupMenu::backgroundColourId,             juce::Colours::black);
+        setColour (juce::PopupMenu::textColourId,                   juce::Colours::white);
+        setColour (juce::PopupMenu::highlightedTextColourId,        juce::Colours::white);
+        setColour (juce::PopupMenu::highlightedBackgroundColourId,  juce::Colour (0xFF101010));
     }
 
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font& f) override
@@ -176,7 +185,118 @@ public:
     }
 
 
-    void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+    
+    // --- ComboBox / PopupMenu: fondo negro + fuente a la mitad ---
+    juce::Font getComboBoxFont (juce::ComboBox& box) override
+    {
+        auto f = juce::LookAndFeel_V4::getComboBoxFont (box);
+        f.setHeight (f.getHeight() * 0.5f);
+        return f;
+    }
+
+    juce::Font getPopupMenuFont() override
+    {
+        auto f = juce::LookAndFeel_V4::getPopupMenuFont();
+        f.setHeight (f.getHeight() * 0.5f);
+        return f;
+    }
+
+    void drawComboBox (juce::Graphics& g, int width, int height, bool,
+                       int buttonX, int buttonY, int buttonW, int buttonH,
+                       juce::ComboBox& box) override
+    {
+        auto bounds = juce::Rectangle<float> (0.0f, 0.0f, (float) width, (float) height).reduced (0.5f);
+        const float r = 4.0f;
+
+        g.setColour (juce::Colours::black);
+        g.fillRoundedRectangle (bounds, r);
+
+        g.setColour (box.findColour (juce::ComboBox::outlineColourId));
+        g.drawRoundedRectangle (bounds, r, 1.0f);
+
+        // Flecha
+        g.setColour (box.findColour (juce::ComboBox::arrowColourId));
+        auto arrowZone = juce::Rectangle<float> ((float) buttonX, (float) buttonY, (float) buttonW, (float) buttonH).reduced (4.0f);
+
+        const float cx = arrowZone.getCentreX();
+        const float cy = arrowZone.getCentreY();
+        const float s  = juce::jmin (arrowZone.getWidth(), arrowZone.getHeight()) * 0.25f;
+
+        juce::Path p;
+        p.startNewSubPath (cx - s, cy - s * 0.5f);
+        p.lineTo          (cx + s, cy - s * 0.5f);
+        p.lineTo          (cx,     cy + s * 0.85f);
+        p.closeSubPath();
+        g.fillPath (p);
+    }
+
+    void drawPopupMenuBackground (juce::Graphics& g, int width, int height) override
+    {
+        g.fillAll (juce::Colours::black);
+        juce::ignoreUnused (width, height);
+    }
+
+    void drawPopupMenuItem (juce::Graphics& g,
+                            const juce::Rectangle<int>& area,
+                            bool isSeparator, bool isActive, bool isHighlighted,
+                            bool isTicked, bool hasSubMenu,
+                            const juce::String& text,
+                            const juce::String& shortcutKeyText,
+                            const juce::Drawable* icon,
+                            const juce::Colour* textColourToUse) override
+    {
+        juce::ignoreUnused (shortcutKeyText, icon);
+
+        if (isSeparator)
+        {
+            auto r = area.reduced (4, 0).toFloat();
+            g.setColour (juce::Colour (0xFF202020));
+            g.drawLine (r.getX(), r.getCentreY(), r.getRight(), r.getCentreY(), 1.0f);
+            return;
+        }
+
+        auto r = area.reduced (1);
+        g.setColour (isHighlighted ? juce::Colour (0xFF101010) : juce::Colours::black);
+        g.fillRect (r);
+
+        auto font = getPopupMenuFont();
+        g.setFont (font);
+
+        juce::Colour tc = textColourToUse != nullptr ? *textColourToUse : findColour (juce::PopupMenu::textColourId);
+        if (! isActive)
+            tc = tc.withMultipliedAlpha (0.35f);
+
+        g.setColour (tc);
+
+        const int tickSpace = 22;
+        auto textArea = r.withTrimmedLeft (tickSpace).withTrimmedRight (10);
+        g.drawFittedText (text, textArea, juce::Justification::centredLeft, 1);
+
+        if (isTicked)
+        {
+            g.setColour (tc);
+            juce::Path tick;
+            const float tx = (float) r.getX() + 7.0f;
+            const float ty = (float) r.getCentreY();
+            tick.startNewSubPath (tx, ty);
+            tick.lineTo (tx + 4.0f, ty + 4.0f);
+            tick.lineTo (tx + 11.0f, ty - 5.0f);
+            g.strokePath (tick, juce::PathStrokeType (1.6f));
+        }
+
+        if (hasSubMenu)
+        {
+            g.setColour (tc);
+            juce::Path arrow;
+            const float ax = (float) r.getRight() - 10.0f;
+            const float ay = (float) r.getCentreY();
+            arrow.startNewSubPath (ax - 3.0f, ay - 5.0f);
+            arrow.lineTo (ax + 3.0f, ay);
+            arrow.lineTo (ax - 3.0f, ay + 5.0f);
+            g.strokePath (arrow, juce::PathStrokeType (1.6f));
+        }
+    }
+void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPosProportional,
                            float rotaryStartAngle, float rotaryEndAngle,
                            juce::Slider& slider) override
@@ -1096,7 +1216,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         // Igual actualizamos el autogain con dry->dry para que se mantenga en unity.
         if (mix01 <= 1.0e-4f)
         {
-            (void) autoGain.processStereo (dryL, dryR, dryL, dryR);
+            { float gL=1.0f, gR=1.0f; autoGain.processStereoIndependent (dryL, dryR, dryL, dryR, gL, gR); }
             ch0[i] = dryL;
             if (ch1 != nullptr)
                 ch1[i] = dryR;
@@ -1106,12 +1226,13 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        // AutoGain ULTRA: calcula ganancia desde dry vs mixed PRE gain
-        const float g = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
+        // AutoGain ULTRA (estéreo robusto): calcula ganancia por canal
+        float gL = 1.0f, gR = 1.0f;
+        autoGain.processStereoIndependent (dryL, dryR, mixedL, mixedR, gL, gR);
 
-        ch0[i] = plugin::softClipSafety (mixedL * g);
+        ch0[i] = plugin::softClipSafety (mixedL * gL);
         if (ch1 != nullptr)
-            ch1[i] = plugin::softClipSafety (mixedR * g);
+            ch1[i] = plugin::softClipSafety (mixedR * gR);
     }
 }
 //==============================================================================
@@ -1120,3 +1241,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
