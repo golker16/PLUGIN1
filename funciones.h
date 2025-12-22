@@ -205,18 +205,28 @@ public:
 
         // Rango amplio para que realmente compense presets/drive agresivos
         setClampDb (-60.0f, +24.0f);
-        setGateDb  (-80.0f);
 
-        // Ventana de medición (RMS EMA). Más grande = más estable; más chica = más reactivo.
-        setMeasurementWindowMs (240.0f);
+        // ✅ Ajustes "full tiempo real" (más reactivo):
+        // - gate más bajo para no "esperar" a que el RMS suba
+        // - ventana de medición mucho más corta (el 'momento' que sentías venía de aquí)
+        // - smoothing de ganancia rápido (sube/baja en pocos ms)
+        //
+        // Nota: estos valores son deliberadamente agresivos.
+        // Si llegas a oír bombeo en material muy dinámico, sube measurementWindowMs
+        // a 20–40ms y/o releaseMs a 10–30ms.
+        setGateDb  (-90.0f);
+
+        // Ventana de medición (RMS EMA).
+        // 12ms ≈ comportamiento prácticamente instantáneo sin depender del tamaño de bloque.
+        setMeasurementWindowMs (12.0f);
 
         // Suavizado de la GANANCIA (no de la medición):
-        // - attack: cuando necesita bajar (evita picos al subir drive)
-        // - release: cuando necesita subir (evita bombeo)
-        setGainSmoothingMs (1.0f, 180.0f);
+        // attack: baja rápido cuando el preset/drive sube nivel
+        // release: sube rápido para mantener el nivel constante
+        setGainSmoothingMs (0.30f, 6.0f);
 
-        // Vuelve a unity en silencio
-        setReturnToUnityMs (700.0f);
+        // Vuelve a unity en silencio (más rápido, evita quedarse "pegado")
+        setReturnToUnityMs (220.0f);
 
         // HP para no dejar que DC/subgrave dicte el autogain
         setMeasureHighpassHz (70.0f);
@@ -485,5 +495,8 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
+
+
+
 
 
