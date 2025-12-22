@@ -44,7 +44,7 @@ public:
 
 private:
     void updateToneCoeffs (float tone01, float drive01);
-    void prepareOversamplingConfigs();
+    void buildOversamplingBanks();
 
     //==============================================================================
     // ✅ Anti-zipper PRO: smoothing + slew limiter dependiente de magnitud
@@ -151,6 +151,7 @@ private:
                 tanh_x2[ch] = 0.0f;
                 atan_x1[ch] = 0.0f;
             }
+        }
         }
 
         static inline Params makeParams (float drive01) noexcept
@@ -606,78 +607,87 @@ private:
     };
 
     //==============================================================================
-    // Parameter pointers
-    std::atomic<float>* pDrive   = nullptr;
-    std::atomic<float>* pTone    = nullptr;
-    std::atomic<float>* pMix     = nullptr;
-    std::atomic<float>* pPreamp  = nullptr;
-    std::atomic<float>* pQuality = nullptr;
-
-    // Anti-zipper PRO
-    SmartSmoother driveSm;
-    SmartSmoother toneSm;
-    SmartSmoother mixSm;
-
-    // Tone Tilt (pre)
-    juce::dsp::IIR::Filter<float> lowShelfL, lowShelfR;
-    juce::dsp::IIR::Filter<float> highShelfL, highShelfR;
-
-    // Tone Tilt (post) - para domar harshness cuando hay drive
-    juce::dsp::IIR::Filter<float> lowShelfPostL, lowShelfPostR;
-    juce::dsp::IIR::Filter<float> highShelfPostL, highShelfPostR;
-
     
-// Oversampling (solo bloque no lineal).
-// Pre-creamos 2x/4x/8x en prepareToPlay() y en audio thread solo switcheamos punteros.
-// 0=2x, 1=4x, 2=8x
-std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, 3> oversamplingConfigs;
-int maxLatencySamples = 0;          // fijo al máximo (8x) para estabilidad
-int currentOSLatencySamples = 0;    // latencia real del modo activo (para alinear DRY)
+//==============================================================================
+// Parameter pointers
+std::atomic<float>* pDrive    = nullptr;
+std::atomic<float>* pTone     = nullptr;
+std::atomic<float>* pMix      = nullptr;
+std::atomic<float>* pPreamp   = nullptr;
+std::atomic<float>* pQuality  = nullptr;
 
+// ✅ Nuevo: AutoGain on/off + Output trim
+std::atomic<float>* pAutoGain = nullptr;
+std::atomic<float>* pOutput   = nullptr;
+
+// Anti-zipper PRO
+SmartSmoother driveSm;
+SmartSmoother toneSm;
+SmartSmoother mixSm;
+
+// Tone Tilt (pre)
+juce::dsp::IIR::Filter<float> lowShelfL, lowShelfR;
+juce::dsp::IIR::Filter<float> highShelfL, highShelfR;
+
+// Tone Tilt (post) - para domar harshness cuando hay drive
+juce::dsp::IIR::Filter<float> lowShelfPostL, lowShelfPostR;
+juce::dsp::IIR::Filter<float> highShelfPostL, highShelfPostR;
+
+//==============================================================================
+// Oversampling banks (RT-safe switch): Eco(2x) / HQ(4x) / Insane(8x)
+static constexpr int kNumOSModes = 3;
+
+std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, kNumOSModes> oversamplingBank {};
+std::array<int,   kNumOSModes> osExponentBank {{ 1, 2, 3 }};     // 1=2x,2=4x,3=8x
+std::array<int,   kNumOSModes> osLatencyBank  {{ 0, 0, 0 }};
+std::array<float, kNumOSModes> osSrBank       {{ 0.0f, 0.0f, 0.0f }};
+
+std::array<StereoInteract, kNumOSModes> stereoInteractBank;
+std::array<DriveSaturator, kNumOSModes> driveSatBank;
+
+std::array<std::array<float, 2>, kNumOSModes> preShaperLPzBank {{ {{0.0f,0.0f}}, {{0.0f,0.0f}}, {{0.0f,0.0f}} }};
+std::array<std::array<float, 2>, kNumOSModes> osAaLPzBank      {{ {{0.0f,0.0f}}, {{0.0f,0.0f}}, {{0.0f,0.0f}} }};
+
+std::atomic<int> activeOSIndex { 1 }; // default HQ (4x)
+int maxOSLatencySamples = 0;
+
+// Buffers (pre-alloc en prepareToPlay; no realloc en audio thread)
 juce::AudioBuffer<float> wetBuffer;
 
-// Prealloc RT-safe: usamos un block size "seguro" en prepareToPlay() y procesamos en chunks.
+// Dry delay para alinear con la latencia del oversampling ACTIVO (para MIX/autogain)
+juce::AudioBuffer<float> dryDelayBuffer;
+int dryDelayWritePos   = 0;
+int dryDelayBufferSize = 0;
+
+// Output delay extra: mantiene latencia TOTAL fija al máximo (8x), aunque cambies quality
+juce::AudioBuffer<float> outDelayBuffer;
+int outDelayWritePos   = 0;
+int outDelayBufferSize = 0;
+
+// En algunos hosts el tamaño de bloque puede variar.
+// Para mantener RT-safe, procesamos por chunks <= maxBlockSizePrepared.
 int maxBlockSizePrepared = 0;
-    // ✅ 3.1) Dry delay para alinear con latencia del oversampling (solo necesario si usas MIX)
-    juce::AudioBuffer<float> dryDelayBuffer;
-    int dryDelayWritePos   = 0;
-    int dryDelaySamples    = 0;
-    int dryDelayBufferSize = 0;
 
+// Preset activo (stateful)
+const PresetRegistry::Item* activePreset = nullptr;
+int activePresetIndex = -1;
 
-// ✅ Latency padding (para mantener latency FIXA = maxLatencySamples aunque bajes Quality)
-juce::AudioBuffer<float> outputDelayBuffer;
-int outputDelayWritePos   = 0;
-int outputDelayBufferSize = 0;
-int outputPadSamples      = 0; // maxLatencySamples - currentOSLatencySamples
+using PresetStateStorage =
+    std::aligned_storage_t<PresetRegistry::kMaxStateSize, PresetRegistry::kMaxStateAlign>;
 
-    // Preset activo (stateful)
-    const PresetRegistry::Item* activePreset = nullptr;
-    int activePresetIndex = -1;
+// Estado por modo de oversampling (evita re-prepare en audio thread al cambiar quality)
+std::array<std::array<PresetStateStorage, 2>, kNumOSModes> presetStateBank {};
+std::array<std::array<bool, 2>, kNumOSModes> presetStateConstructedBank
+    {{ {{ false, false }}, {{ false, false }}, {{ false, false }} }};
 
-    using PresetStateStorage =
-        std::aligned_storage_t<PresetRegistry::kMaxStateSize, PresetRegistry::kMaxStateAlign>;
-    std::array<PresetStateStorage, 2> presetState {}; // hasta estéreo
-    std::array<bool, 2> presetStateConstructed {{ false, false }};
+plugin::AutoGainExact autoGain;
 
-    plugin::AutoGainExact autoGain;
+// Estado de UI/CPU
+bool autoGainWasEnabled = true;
 
-    // ✅ Nuevo: interacción estéreo PRO para oversampled
-    StereoInteract stereoInteract;
-
-    // ✅ Nuevo: Drive multi-etapa (3D)
-    DriveSaturator driveSat;
-
-    // ✅ Nuevo: LP pre-distorsión dependiente de drive (en dominio oversampled)
-    std::array<float, 2> preShaperLPz {{ 0.0f, 0.0f }};
-
-    // ✅ Nuevo: LP anti-alias final (en dominio oversampled, antes de downsample)
-    std::array<float, 2> osAaLPz {{ 0.0f, 0.0f }};
-
-
-    double sr = 48000.0;
-    float  osSr = 384000.0f; // sr * oversamplingFactor (se recalcula en prepareToPlay)
+double sr = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (YourPluginAudioProcessor)
 };
+
 
