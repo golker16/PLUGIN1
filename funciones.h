@@ -6,29 +6,31 @@
 #include <JuceHeader.h>
 #include <cmath>
 
+
 //------------------------------------------------------------------------------
 // Assets / BinaryData
 // - PLUGIN_HAS_ASSETS: definido desde CMake cuando existe al menos 1 archivo
 //   dentro de /assets (PNGs y/o fuentes).
-// - PLUGIN_HAS_CUSTOM_FONT + PLUGIN_CUSTOM_FONT_RESOURCE: definidos desde CMake
-//   cuando existe al menos 1 .ttf/.otf en /assets.
+// - PLUGIN_HAS_FONT + PLUGIN_PRIMARY_FONT_FILENAME: definidos desde CMake cuando
+//   existe al menos 1 .ttf/.otf en /assets.
 //
 // Si por alguna razón el build no define estas macros, no rompas la compilación.
 #ifndef PLUGIN_HAS_ASSETS
  #define PLUGIN_HAS_ASSETS 0
 #endif
 
-#ifndef PLUGIN_HAS_CUSTOM_FONT
- #define PLUGIN_HAS_CUSTOM_FONT 0
+#ifndef PLUGIN_HAS_FONT
+ #define PLUGIN_HAS_FONT 0
 #endif
 
-#ifndef PLUGIN_CUSTOM_FONT_RESOURCE
- #define PLUGIN_CUSTOM_FONT_RESOURCE ""
+#ifndef PLUGIN_PRIMARY_FONT_FILENAME
+ #define PLUGIN_PRIMARY_FONT_FILENAME ""
 #endif
 
 #if PLUGIN_HAS_ASSETS
  #include "BinaryData.h"
 #endif
+
 
 namespace plugin
 {
@@ -458,8 +460,10 @@ private:
 // UI helpers
 namespace ui
 {
+
+
 //==============================================================================
-// GlobalFontLookAndFeel
+// GlobalFontLookAndFeel (JUCE 8 compatible)
 //
 // Permite forzar una fuente embebida (TTF/OTF) para TODO el texto del plugin,
 // incluyendo:
@@ -467,20 +471,13 @@ namespace ui
 // - ComboBox (texto y popup menu)
 // - PopupMenu (items de menús plegables)
 //
-// Para activarlo:
-// 1) Copia una fuente .ttf/.otf dentro de /assets
-// 2) CMake detecta la primera fuente y define:
-//      PLUGIN_HAS_CUSTOM_FONT=1
-//      PLUGIN_CUSTOM_FONT_RESOURCE="Nombre_ttf"
-// 3) El editor aplica este LookAndFeel.
+// En JUCE 8 ya NO existe Font::setTypefacePtr(), así que el método correcto
+// es devolver el Typeface desde getTypefaceForFont().
 struct GlobalFontLookAndFeel : juce::LookAndFeel_V4
 {
     GlobalFontLookAndFeel()
     {
         customTypeface = loadTypefaceFromAssets();
-
-        // Si hay fuente, deja que la L&F la use en menús también.
-        // (El override de getTypefaceForFont ya cubre la mayoría de casos.)
     }
 
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font& f) override
@@ -491,31 +488,52 @@ struct GlobalFontLookAndFeel : juce::LookAndFeel_V4
         return juce::LookAndFeel_V4::getTypefaceForFont (f);
     }
 
-    juce::Font getPopupMenuFont() override
-    {
-        auto f = juce::LookAndFeel_V4::getPopupMenuFont();
-        if (customTypeface != nullptr)
-            f.setTypefacePtr (customTypeface);
-        return f;
-    }
-
-    juce::Font getComboBoxFont (juce::ComboBox& box) override
-    {
-        auto f = juce::LookAndFeel_V4::getComboBoxFont (box);
-        if (customTypeface != nullptr)
-            f.setTypefacePtr (customTypeface);
-        return f;
-    }
-
 private:
+    static juce::String sanitizeResourceName (const juce::String& s)
+    {
+        juce::String out;
+        out.preallocateBytes ((size_t) s.getNumBytesAsUTF8());
+
+        for (auto c : s)
+        {
+            if (juce::CharacterFunctions::isLetterOrDigit (c) || c == '_')
+                out += juce::String::charToString ((juce::juce_wchar) c);
+            else
+                out += "_";
+        }
+
+        if (out.isNotEmpty() && ! (juce::CharacterFunctions::isLetter (out[0]) || out[0] == '_'))
+            out = "_" + out;
+
+        return out;
+    }
+
     static juce::Typeface::Ptr loadTypefaceFromAssets()
     {
-       #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_CUSTOM_FONT
-        int dataSize = 0;
-        if (auto* data = BinaryData::getNamedResource (PLUGIN_CUSTOM_FONT_RESOURCE, dataSize))
+       #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
+        const juce::String fontFile (PLUGIN_PRIMARY_FONT_FILENAME);
+        if (fontFile.isEmpty())
+            return {};
+
+        const auto base = sanitizeResourceName (fontFile);
+
+        // BinaryData suele usar nombres "sanitizados" y a veces con prefijos.
+        juce::StringArray candidates;
+        candidates.add (base);
+        candidates.add ("_" + base);
+        candidates.add ("f_" + base);
+        candidates.add (base.toLowerCase());
+        candidates.add ("_" + base.toLowerCase());
+        candidates.add ("f_" + base.toLowerCase());
+
+        for (auto name : candidates)
         {
-            if (dataSize > 0)
-                return juce::Typeface::createSystemTypefaceFor (data, (size_t) dataSize);
+            int dataSize = 0;
+            if (auto* data = BinaryData::getNamedResource (name.toRawUTF8(), dataSize))
+            {
+                if (dataSize > 0)
+                    return juce::Typeface::createSystemTypefaceFor (data, (size_t) dataSize);
+            }
         }
        #endif
         return {};
@@ -523,6 +541,7 @@ private:
 
     juce::Typeface::Ptr customTypeface;
 };
+
 
 struct SimpleKnobLookAndFeel : juce::LookAndFeel_V4
 {
@@ -584,7 +603,7 @@ struct LabeledKnob : juce::Component
         label.setInterceptsMouseClicks (false, false);
 
         // fallback label más pequeño si no hay PNG
-        label.setFont (juce::Font (9.0f));
+        label.setFont (juce::Font (juce::FontOptions (9.0f)));
 
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -650,4 +669,6 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
+
+
 
