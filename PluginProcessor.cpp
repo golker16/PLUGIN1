@@ -476,6 +476,76 @@ void YourPluginAudioProcessor::updateToneCoeffs (float tone01, float drive01)
     // Q dinámico (en centro casi plano, hacia extremos más "decisión")
     const float q = 0.707f + 0.38f * mag01;
 
+    // helpers RT-safe: shelf RBJ, sin asignaciones
+    auto dbToGain = [] (float db) noexcept
+    {
+        // gain = 10^(db/20) = exp2(db/6.0206)
+        return std::exp2 (db / 6.0205999132796239f);
+    };
+
+    auto setCoeffs = [] (juce::dsp::IIR::Coefficients<float>& c,
+                         float b0, float b1, float b2, float a0, float a1, float a2) noexcept
+    {
+        // Normalizar a0 -> 1
+        const float invA0 = 1.0f / a0;
+        b0 *= invA0; b1 *= invA0; b2 *= invA0;
+        a1 *= invA0; a2 *= invA0;
+
+        // JUCE dsp IIR coefficients: {b0,b1,b2,a0,a1,a2}
+        c.coefficients[0] = b0;
+        c.coefficients[1] = b1;
+        c.coefficients[2] = b2;
+        c.coefficients[3] = 1.0f;
+        c.coefficients[4] = a1;
+        c.coefficients[5] = a2;
+    };
+
+    auto calcLowShelf = [&] (float fc, float slope, float gainLin,
+                             juce::dsp::IIR::Coefficients<float>& dst) noexcept
+    {
+        const float A = std::sqrt (juce::jmax (1.0e-12f, gainLin));
+        const float w0 = 2.0f * juce::MathConstants<float>::pi * (fc / (float) sr);
+        const float cosw0 = std::cos (w0);
+        const float sinw0 = std::sin (w0);
+
+        const float S = juce::jlimit (0.10f, 4.00f, slope);
+        const float tmp = (A + 1.0f / A) * (1.0f / S - 1.0f) + 2.0f;
+        const float alpha = 0.5f * sinw0 * std::sqrt (juce::jmax (0.0f, tmp));
+        const float twoSqrtAAlpha = 2.0f * std::sqrt (A) * alpha;
+
+        const float b0 =    A * ((A + 1.0f) - (A - 1.0f) * cosw0 + twoSqrtAAlpha);
+        const float b1 =  2.0f * A * ((A - 1.0f) - (A + 1.0f) * cosw0);
+        const float b2 =    A * ((A + 1.0f) - (A - 1.0f) * cosw0 - twoSqrtAAlpha);
+        const float a0 =          (A + 1.0f) + (A - 1.0f) * cosw0 + twoSqrtAAlpha;
+        const float a1 =   -2.0f * ((A - 1.0f) + (A + 1.0f) * cosw0);
+        const float a2 =          (A + 1.0f) + (A - 1.0f) * cosw0 - twoSqrtAAlpha;
+
+        setCoeffs (dst, b0, b1, b2, a0, a1, a2);
+    };
+
+    auto calcHighShelf = [&] (float fc, float slope, float gainLin,
+                              juce::dsp::IIR::Coefficients<float>& dst) noexcept
+    {
+        const float A = std::sqrt (juce::jmax (1.0e-12f, gainLin));
+        const float w0 = 2.0f * juce::MathConstants<float>::pi * (fc / (float) sr);
+        const float cosw0 = std::cos (w0);
+        const float sinw0 = std::sin (w0);
+
+        const float S = juce::jlimit (0.10f, 4.00f, slope);
+        const float tmp = (A + 1.0f / A) * (1.0f / S - 1.0f) + 2.0f;
+        const float alpha = 0.5f * sinw0 * std::sqrt (juce::jmax (0.0f, tmp));
+        const float twoSqrtAAlpha = 2.0f * std::sqrt (A) * alpha;
+
+        const float b0 =    A * ((A + 1.0f) + (A - 1.0f) * cosw0 + twoSqrtAAlpha);
+        const float b1 = -2.0f * A * ((A - 1.0f) + (A + 1.0f) * cosw0);
+        const float b2 =    A * ((A + 1.0f) + (A - 1.0f) * cosw0 - twoSqrtAAlpha);
+        const float a0 =          (A + 1.0f) - (A - 1.0f) * cosw0 + twoSqrtAAlpha;
+        const float a1 =    2.0f * ((A - 1.0f) - (A + 1.0f) * cosw0);
+        const float a2 =          (A + 1.0f) - (A - 1.0f) * cosw0 - twoSqrtAAlpha;
+
+        setCoeffs (dst, b0, b1, b2, a0, a1, a2);
+    };
+
     // -------------------------
     // PRE tilt (pivot musical ~900Hz)
     float fcLowPre  = 420.0f;
@@ -495,18 +565,16 @@ void YourPluginAudioProcessor::updateToneCoeffs (float tone01, float drive01)
     fcLowPre  = juce::jlimit (140.0f,  900.0f, fcLowPre);
     fcHighPre = juce::jlimit (900.0f,  6500.0f, fcHighPre);
 
-    auto lowPre  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (
-        sr, fcLowPre, q, juce::Decibels::decibelsToGain (-preTiltDb));
-    auto highPre = juce::dsp::IIR::Coefficients<float>::makeHighShelf (
-        sr, fcHighPre, q, juce::Decibels::decibelsToGain ( preTiltDb));
+    const float preGainLow  = dbToGain (-preTiltDb);
+    const float preGainHigh = dbToGain ( preTiltDb);
 
-    *lowShelfL.coefficients  = *lowPre;
-    *lowShelfR.coefficients  = *lowPre;
-    *highShelfL.coefficients = *highPre;
-    *highShelfR.coefficients = *highPre;
+    calcLowShelf  (fcLowPre,  q, preGainLow,  *lowShelfL.coefficients);
+    calcLowShelf  (fcLowPre,  q, preGainLow,  *lowShelfR.coefficients);
+    calcHighShelf (fcHighPre, q, preGainHigh, *highShelfL.coefficients);
+    calcHighShelf (fcHighPre, q, preGainHigh, *highShelfR.coefficients);
 
     // -------------------------
-    // POST tilt: más enfocado en "fritura"/brillo de la distorsión
+    // POST tilt
     float fcLowPost  = 280.0f;
     float fcHighPost = 3800.0f;
 
@@ -519,193 +587,19 @@ void YourPluginAudioProcessor::updateToneCoeffs (float tone01, float drive01)
     fcHighPost = juce::jlimit (1400.0f, 9000.0f, fcHighPost);
 
     const float qPost = 0.707f + 0.25f * mag01;
-    auto lowPost  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (
-        sr, fcLowPost, qPost, juce::Decibels::decibelsToGain (-postTiltDb));
-    auto highPost = juce::dsp::IIR::Coefficients<float>::makeHighShelf (
-        sr, fcHighPost, qPost, juce::Decibels::decibelsToGain ( postTiltDb));
 
-    *lowShelfPostL.coefficients  = *lowPost;
-    *lowShelfPostR.coefficients  = *lowPost;
-    *highShelfPostL.coefficients = *highPost;
-    *highShelfPostR.coefficients = *highPost;
+    const float postGainLow  = dbToGain (-postTiltDb);
+    const float postGainHigh = dbToGain ( postTiltDb);
+
+    calcLowShelf  (fcLowPost,  qPost, postGainLow,  *lowShelfPostL.coefficients);
+    calcLowShelf  (fcLowPost,  qPost, postGainLow,  *lowShelfPostR.coefficients);
+    calcHighShelf (fcHighPost, qPost, postGainHigh, *highShelfPostL.coefficients);
+    calcHighShelf (fcHighPost, qPost, postGainHigh, *highShelfPostR.coefficients);
 
     // Drive ↔ Tone: softening highs (anti-fizz) a más drive
     const float softPos = std::pow (d, 1.20f);
     const float hfHz = 18000.0f - 9000.0f * softPos; // 18k -> 9k
     driveSat.setHighSoftHz (hfHz);
-}
-
-//==============================================================================
-// Oversampling (Eco/HQ/Insane) - SOLO bloque no lineal
-void YourPluginAudioProcessor::rebuildOversampling (int newExponent)
-{
-    const auto channels = (size_t) juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
-
-    osExponent = juce::jlimit (1, 3, newExponent);
-
-    // Elegimos filtros según modo (más CPU/menos aliasing a mayor calidad).
-    // En JUCE "clásico" (muchos proyectos), Oversampling solo expone:
-    //  - filterHalfBandPolyphaseIIR
-    //  - filterHalfBandFIREquiripple
-    // (PolyphaseFIR/"FIR" no están en todas las versiones).
-    //
-    // Mapeo robusto (compatible):
-    //   Eco    (2x) -> IIR (ligero)
-    //   HQ     (4x) -> Equiripple (calidad)
-    //   Insane (8x) -> Equiripple + maxQuality (más taps/stopband)
-    juce::dsp::Oversampling<float>::FilterType type = juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR;
-    bool maxQuality = false;
-    if (osExponent >= 2)
-        type = juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple;
-    if (osExponent >= 3)
-        maxQuality = true;
-
-    oversampling = std::make_unique<juce::dsp::Oversampling<float>> (
-        channels,
-        osExponent,
-        type,
-        maxQuality);
-
-    oversampling->reset();
-    oversampling->initProcessing ((size_t) juce::jmax (1, maxBlockSizePrepared));
-
-    osExponentPrepared = osExponent;
-
-    const int latency = (int) oversampling->getLatencyInSamples();
-    setLatencySamples (latency);
-
-    // Dry delay (alineación para MIX)
-    dryDelaySamples    = latency;
-    dryDelayWritePos   = 0;
-    dryDelayBufferSize = juce::jmax (1, maxBlockSizePrepared + dryDelaySamples + 1);
-
-    dryDelayBuffer.setSize ((int) channels, dryDelayBufferSize, false, false, true);
-    dryDelayBuffer.clear();
-
-    // wet buffer (base SR)
-    wetBuffer.setSize ((int) channels, juce::jmax (1, maxBlockSizePrepared), false, false, true);
-
-    // SR oversampled
-    const float osFactor = (float) (1u << osExponent);
-    osSr = (float) (sr * osFactor);
-
-    // Módulos oversampled
-    stereoInteract.prepare (osSr);
-    driveSat.prepare (osSr);
-
-    // Reset estados de filtros en dominio oversampled (evita clicks al cambiar calidad/SR)
-    preShaperLPz = {{ 0.0f, 0.0f }};
-    osAaLPz      = {{ 0.0f, 0.0f }};
-
-
-    // Si hay preset activo, re-prepare al nuevo SR interno
-    if (activePreset != nullptr)
-    {
-        for (int ch = 0; ch < 2; ++ch)
-        {
-            void* st = (void*) &presetState[(size_t) ch];
-            if (presetStateConstructed[(size_t) ch])
-            {
-                if (activePreset->prepare) activePreset->prepare (st, osSr);
-                if (activePreset->reset)   activePreset->reset (st);
-            }
-        }
-    }
-}
-
-//==============================================================================
-// Prepare
-void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
-{
-    sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
-
-    // ✅ Anti-zipper PRO (smoothing dependiente de magnitud + slew limiter)
-    driveSm.prepare (sr, 2.0f, 24.0f, 10.0f);
-    toneSm .prepare (sr, 1.8f, 26.0f, 12.0f);
-    mixSm  .prepare (sr, 1.2f, 18.0f, 20.0f);
-
-    // getRawParameterValue() devuelve std::atomic<float>* -> leer con .load()
-    driveSm.reset (pDrive ? pDrive->load() : 0.25f);
-    toneSm .reset (pTone  ? pTone ->load() : 0.5f);
-    mixSm  .reset (pMix   ? pMix  ->load() : 1.0f);
-
-    // Inicializa coef pointers (evita null)
-    lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 220.0f, 0.707f, 1.0f);
-    lowShelfR.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 220.0f, 0.707f, 1.0f);
-    highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3200.0f, 0.707f, 1.0f);
-    highShelfR.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3200.0f, 0.707f, 1.0f);
-
-    lowShelfPostL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 220.0f, 0.707f, 1.0f);
-    lowShelfPostR.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 220.0f, 0.707f, 1.0f);
-    highShelfPostL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 4200.0f, 0.707f, 1.0f);
-    highShelfPostR.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 4200.0f, 0.707f, 1.0f);
-
-    // ✅ AutoGain por bloque (entrada alineada vs salida real) para volumen constante
-    autoGain.prepare (sr);
-
-    // Guardar block size inicial (si el host luego usa uno mayor, creceremos buffers/OS)
-    maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
-
-    // Oversampling (solo bloque no lineal) según Quality
-    const int choice = (pQuality != nullptr ? (int) std::round (pQuality->load()) : 1);
-    const int exponent = juce::jlimit (1, 3, 1 + choice);
-    rebuildOversampling (exponent);
-
-    // Reset por seguridad (prepareToPlay puede llamarse varias veces)
-    preShaperLPz = {{ 0.0f, 0.0f }};
-    osAaLPz      = {{ 0.0f, 0.0f }};
-
-
-    // ahora que driveSat ya conoce osSr, actualiza Tone↔Drive correctamente
-    updateToneCoeffs (pTone ? pTone->load() : 0.5f,
-                      pDrive ? pDrive->load() : 0.25f);
-
-    // ---------------------------------------------------------------------
-    // Preset state lifecycle
-    //
-    // prepareToPlay() puede llamarse múltiples veces. Si ya teníamos un preset
-    // activo, destruimos los estados construidos para evitar UB.
-    if (activePreset != nullptr && activePreset->destruct != nullptr)
-    {
-        for (int ch = 0; ch < 2; ++ch)
-        {
-            if (presetStateConstructed[(size_t) ch])
-                activePreset->destruct ((void*) &presetState[(size_t) ch]);
-        }
-    }
-
-    presetStateConstructed = {{ false, false }};
-
-    // Limpia bytes (no es estrictamente necesario, pero deja todo en un estado limpio)
-    for (auto& st : presetState)
-        std::memset (&st, 0, sizeof (st));
-
-    // ---- PRESET inicial (blindado) ----
-    activePresetIndex = -1;
-    activePreset = nullptr;
-
-    int preampIndex = 0;
-    if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
-        preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                    (int) std::lround (pPreamp->load()));
-
-    if (PresetRegistry::items.size() > 0)
-    {
-        activePresetIndex = preampIndex;
-        activePreset = &PresetRegistry::items[(size_t) preampIndex];
-
-        for (int ch = 0; ch < 2; ++ch)
-        {
-            void* st = (void*) &presetState[(size_t) ch];
-            if (activePreset->construct != nullptr)
-            {
-                activePreset->construct (st);
-                presetStateConstructed[(size_t) ch] = true;
-            }
-            if (activePreset->prepare) activePreset->prepare (st, osSr);
-            if (activePreset->reset)   activePreset->reset (st);
-        }
-    }
 }
 
 //==============================================================================
@@ -717,25 +611,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     const int numCh = buffer.getNumChannels();
     const int numSamples = buffer.getNumSamples();
 
-    // FL Studio y otros hosts pueden variar el block size. Si crece,
-    // re-inicializamos oversampling y buffers para evitar desalineaciones.
-    if (numSamples > maxBlockSizePrepared)
-    {
-        maxBlockSizePrepared = numSamples;
-        if (oversampling != nullptr)
-            oversampling->initProcessing ((size_t) maxBlockSizePrepared);
-
-        // crecer wetBuffer (pre OS)
-        const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
-        wetBuffer.setSize (wetCh, maxBlockSizePrepared, false, false, true);
-
-        // crecer delay para DRY alineado
-        dryDelayBufferSize = maxBlockSizePrepared + dryDelaySamples + 1;
-        dryDelayBuffer.setSize (wetCh, dryDelayBufferSize, false, false, true);
-        dryDelayBuffer.clear();
-        dryDelayWritePos = 0;
-    }
-
+    // Limpiar canales extra
     for (int ch = 2; ch < numCh; ++ch)
         buffer.clear (ch, 0, numSamples);
 
@@ -747,13 +623,47 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     const float toneTarget  = (pTone  != nullptr ? pTone ->load() : 0.5f);
     const float mixTarget   = (pMix   != nullptr ? pMix  ->load() : 1.0f);
 
-    // Quality: si cambia, reconstruimos oversampling SOLO para el bloque no lineal
-    const int choice = (pQuality != nullptr ? (int) std::round (pQuality->load()) : 1);
-    const int exponent = juce::jlimit (1, 3, 1 + choice);
-    if (exponent != osExponentPrepared)
-        rebuildOversampling (exponent);
+    // Quality: 0=Eco(2x), 1=HQ(4x), 2=Insane(8x)
+    const int choice = (pQuality != nullptr ? (int) std::lround (pQuality->load()) : 1);
+    const int newOSIndex = juce::jlimit (0, 2, choice);
 
-    // Selección de preset
+    // RT-safe: cambiar punteros / recomputar SR interno (sin alloc)
+    if (newOSIndex != activeOSIndex && oversamplingConfigs[(size_t) newOSIndex] != nullptr)
+    {
+        activeOSIndex = newOSIndex;
+
+        currentOSLatencySamples = (int) oversamplingConfigs[(size_t) activeOSIndex]->getLatencyInSamples();
+        dryDelaySamples = currentOSLatencySamples;
+
+        outputPadSamples = juce::jmax (0, maxLatencySamples - currentOSLatencySamples);
+
+        const float osFactor = (float) (1u << (1 + activeOSIndex));
+        osSr = (float) (sr * osFactor);
+
+        // módulos oversampled (RT-safe: solo floats + reset)
+        stereoInteract.prepare (osSr);
+        driveSat.prepare (osSr);
+
+        // reset estados oversampled para evitar basura / NaN al cambiar Quality
+        preShaperLPz = {{ 0.0f, 0.0f }};
+        osAaLPz      = {{ 0.0f, 0.0f }};
+
+        // preset: re-prepare al SR interno nuevo
+        if (activePreset != nullptr)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                void* st = (void*) &presetState[(size_t) ch];
+                if (presetStateConstructed[(size_t) ch])
+                {
+                    if (activePreset->prepare) activePreset->prepare (st, osSr);
+                    if (activePreset->reset)   activePreset->reset (st);
+                }
+            }
+        }
+    }
+
+    // Selección de preset (puede cambiar por bloque)
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
@@ -765,17 +675,14 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         if (activePreset != nullptr && activePreset->destruct != nullptr)
         {
             for (int ch = 0; ch < 2; ++ch)
-            {
                 if (presetStateConstructed[(size_t) ch])
                     activePreset->destruct ((void*) &presetState[(size_t) ch]);
-            }
         }
 
         presetStateConstructed = {{ false, false }};
 
         activePresetIndex = preampIndex;
         activePreset = &PresetRegistry::items[(size_t) preampIndex];
-        // osSr ya lo define rebuildOversampling(). Si cambias de preset, solo re-prepare.
 
         for (int ch = 0; ch < 2; ++ch)
         {
@@ -793,260 +700,249 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     // Actualiza Tone (tilt) en base al valor suavizado actual (evita zipper por bloques)
     updateToneCoeffs (toneSm.getCurrent(), driveSm.getCurrent());
 
-    // Asegura wetBuffer sin realocar cada bloque
-    const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
-    if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < numSamples)
-        wetBuffer.setSize (wetCh, numSamples, false, false, true);
+    // Punteros de delays (una vez por bloque)
+    auto* dL = dryDelayBuffer.getWritePointer (0);
+    auto* dR = (dryDelayBuffer.getNumChannels() > 1) ? dryDelayBuffer.getWritePointer (1) : nullptr;
+    const int drySize = dryDelayBuffer.getNumSamples();
 
-    auto* wetL = wetBuffer.getWritePointer (0);
-    auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
+    auto* oL = outputDelayBuffer.getWritePointer (0);
+    auto* oR = (outputDelayBuffer.getNumChannels() > 1) ? outputDelayBuffer.getWritePointer (1) : nullptr;
+    const int outSize = outputDelayBuffer.getNumSamples();
 
-    // -------------------------------------------------------------------------
-    // 1) WET base SR: input drive real (dB) + Tone PRE (tilt)
-    float drive01ForBlock = driveSm.getCurrent();
-    for (int i = 0; i < numSamples; ++i)
+    // Procesamos en chunks para evitar realloc en hosts con bloques gigantes
+    int offset = 0;
+    while (offset < numSamples)
     {
-        const float drive01 = driveSm.process (driveTarget);
-        (void) toneSm.process (toneTarget); // smoothing para próximos bloques
-        drive01ForBlock = drive01;
+        const int block = juce::jmin (maxBlockSizePrepared, numSamples - offset);
+        const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
 
-        const float pregain = juce::Decibels::decibelsToGain (plugin::mapDriveDb (drive01));
+        auto* wetL = wetBuffer.getWritePointer (0);
+        auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
-        float xL = ch0[i] * pregain;
-        xL = lowShelfL.processSample (xL);
-        xL = highShelfL.processSample (xL);
-        wetL[i] = xL;
+        // -------------------------------------------------------------------------
+        // 1) WET base SR: pregain + Tone PRE (tilt)
+        float drive01ForBlock = driveSm.getCurrent();
 
-        if (wetR != nullptr && ch1 != nullptr)
+        for (int i = 0; i < block; ++i)
         {
-            float xR = ch1[i] * pregain;
-            xR = lowShelfR.processSample (xR);
-            xR = highShelfR.processSample (xR);
-            wetR[i] = xR;
-        }
-    }
+            const float drive01 = driveSm.process (driveTarget);
+            (void) toneSm.process (toneTarget); // smoothing para próximos bloques
+            drive01ForBlock = drive01;
 
-    // -------------------------------------------------------------------------
-    // 2) Oversampling SOLO donde duele (bloque no-lineal)
-    if (oversampling != nullptr)
-    {
-        juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
+            const float pregain = plugin::drive01ToPregainFast (drive01);
 
-        // procesamos SOLO numSamples (aunque wetBuffer sea más grande)
-        baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
+            float xL = plugin::sanitize (ch0[offset + i] * pregain);
+            xL = lowShelfL.processSample (xL);
+            xL = highShelfL.processSample (xL);
+            wetL[i] = plugin::sanitize (xL);
 
-        auto osBlock = oversampling->processSamplesUp (baseBlock);
-
-        const size_t osSamples = osBlock.getNumSamples();
-        const size_t osCh = osBlock.getNumChannels();
-
-        const auto satParams = DriveSaturator::makeParams (drive01ForBlock);
-
-        // ---------------------------------------------------------------------
-        // (PRO) Anti-alias upgrades:
-        //  - LP PRE-shaper dependiente de drive (mata fizz / reduce aliasing)
-        //  - LP final en dominio oversampled antes del downsample
-        const float d = juce::jlimit (0.0f, 1.0f, drive01ForBlock);
-        auto smoothstep = [] (float a, float b, float x)
-        {
-            const float t = juce::jlimit (0.0f, 1.0f, (x - a) / (b - a));
-            return t * t * (3.0f - 2.0f * t);
-        };
-
-        const float preAmt = smoothstep (0.55f, 1.00f, d);          // 0..1
-        const float baseNyq = 0.5f * (float) sr;
-
-        const float preHzTarget = 20000.0f - 12000.0f * preAmt;     // 20k -> 8k
-        const float preHz = juce::jlimit (5000.0f, 0.49f * baseNyq, preHzTarget);
-        const float preA  = std::exp (-2.0f * juce::MathConstants<float>::pi * preHz / osSr);
-
-        const float aaHz = 0.47f * baseNyq;                         // ~0.235*sr
-        const float aaA  = std::exp (-2.0f * juce::MathConstants<float>::pi * aaHz / osSr);
-
-        auto preLP = [&] (float x, int chIdx) noexcept
-        {
-            const int ch = juce::jlimit (0, 1, chIdx);
-            if (preAmt <= 1.0e-4f)
+            if (wetR != nullptr)
             {
-                preShaperLPz[(size_t) ch] = x;
-                return x;
+                const float inR = (ch1 != nullptr) ? ch1[offset + i] : ch0[offset + i];
+                float xR = plugin::sanitize (inR * pregain);
+                xR = lowShelfR.processSample (xR);
+                xR = highShelfR.processSample (xR);
+                wetR[i] = plugin::sanitize (xR);
             }
+        }
 
-            const float y = (1.0f - preA) * x + preA * preShaperLPz[(size_t) ch];
-            preShaperLPz[(size_t) ch] = y;
-
-            // crossfade: 100% lineal cuando preAmt==0
-            return x + preAmt * (y - x);
-        };
-
-
-        // ✅ B) Loop por muestra con interacción estéreo PRO (si osCh == 2)
-        if (osCh == 2)
+        // -------------------------------------------------------------------------
+        // 2) Oversampling SOLO donde duele (bloque no-lineal)
+        auto* os = oversamplingConfigs[(size_t) activeOSIndex].get();
+        if (os != nullptr)
         {
-            float* L = osBlock.getChannelPointer (0);
-            float* R = osBlock.getChannelPointer (1);
+            juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
+            baseBlock = baseBlock.getSubBlock (0, (size_t) block);
 
-            void* stL = (void*) &presetState[0];
-            void* stR = (void*) &presetState[1];
+            auto osBlock = os->processSamplesUp (baseBlock);
 
-            for (size_t n = 0; n < osSamples; ++n)
+            const size_t osSamples = osBlock.getNumSamples();
+            const size_t osCh = osBlock.getNumChannels();
+
+            const auto satParams = DriveSaturator::makeParams (drive01ForBlock);
+
+            // Anti-alias LP dependiente de drive (pre) + LP final (post)
+            const float d = juce::jlimit (0.0f, 1.0f, drive01ForBlock);
+            auto smoothstep = [] (float a, float b, float x)
             {
-                float xL = L[n];
-                float xR = R[n];
+                const float t = juce::jlimit (0.0f, 1.0f, (x - a) / (b - a));
+                return t * t * (3.0f - 2.0f * t);
+            };
 
-                // LP pre-shaper (drive-dependent)
-                xL = preLP (xL, 0);
-                xR = preLP (xR, 1);
+            const float preAmt = smoothstep (0.55f, 1.00f, d);          // 0..1
+            const float baseNyq = 0.5f * (float) sr;
 
-                stereoInteract.processSample (xL, xR);
+            const float preHzTarget = 20000.0f - 12000.0f * preAmt;     // 20k -> 8k
+            const float preHz = juce::jlimit (5000.0f, 0.49f * baseNyq, preHzTarget);
+            const float preA  = std::exp (-2.0f * juce::MathConstants<float>::pi * preHz / osSr);
 
-                // Drive multi-etapa (3D) + bias + dc blocker
-                xL = driveSat.processSample (xL, 0, satParams);
-                xR = driveSat.processSample (xR, 1, satParams);
+            const float aaHz = 0.47f * baseNyq;
+            const float aaA  = std::exp (-2.0f * juce::MathConstants<float>::pi * aaHz / osSr);
 
-                if (activePreset != nullptr && activePreset->process != nullptr)
+            auto preLP = [&] (float x, int chIdx) noexcept
+            {
+                const int ch = juce::jlimit (0, 1, chIdx);
+                if (preAmt <= 1.0e-4f)
                 {
-                    xL = activePreset->process (stL, xL);
-                    xR = activePreset->process (stR, xR);
+                    preShaperLPz[(size_t) ch] = x;
+                    return x;
                 }
 
-                L[n] = xL;
-                R[n] = xR;
-            }
-        }
-        else
-        {
-            for (size_t ch = 0; ch < osCh; ++ch)
+                const float y = (1.0f - preA) * x + preA * preShaperLPz[(size_t) ch];
+                preShaperLPz[(size_t) ch] = y;
+                return x + preAmt * (y - x);
+            };
+
+            if (osCh == 2)
             {
-                float* data = osBlock.getChannelPointer (ch);
-                void* st = (void*) &presetState[juce::jmin ((size_t) 1, ch)];
+                float* L = osBlock.getChannelPointer (0);
+                float* R = osBlock.getChannelPointer (1);
+
+                void* stL = (void*) &presetState[0];
+                void* stR = (void*) &presetState[1];
 
                 for (size_t n = 0; n < osSamples; ++n)
                 {
-                    float x = data[n];
+                    float xL = plugin::sanitize (L[n]);
+                    float xR = plugin::sanitize (R[n]);
 
-                    // LP pre-shaper (drive-dependent)
-                    x = preLP (x, (int) ch);
+                    xL = preLP (xL, 0);
+                    xR = preLP (xR, 1);
 
-                    x = driveSat.processSample (x, (int) ch, satParams);
+                    stereoInteract.processSample (xL, xR);
+
+                    xL = driveSat.processSample (xL, 0, satParams);
+                    xR = driveSat.processSample (xR, 1, satParams);
+
                     if (activePreset != nullptr && activePreset->process != nullptr)
-                        x = activePreset->process (st, x);
-                    data[n] = x;
+                    {
+                        xL = activePreset->process (stL, xL);
+                        xR = activePreset->process (stR, xR);
+                    }
+
+                    L[n] = plugin::sanitize (xL);
+                    R[n] = plugin::sanitize (xR);
                 }
             }
-        }
-
-        
-        // ---------------------------------------------------------------------
-        // (PRO) Anti-alias LP final en dominio oversampled (antes del downsample)
-        // Limpia energía > ~0.47*Nyquist(base) para que no "caiga" al bajar SR.
-        for (size_t ch = 0; ch < osCh; ++ch)
-        {
-            float* data = osBlock.getChannelPointer (ch);
-            float z = osAaLPz[juce::jlimit ((size_t) 0, (size_t) 1, ch)];
-
-            for (size_t n = 0; n < osSamples; ++n)
+            else
             {
-                const float y = (1.0f - aaA) * data[n] + aaA * z;
-                z = y;
-                data[n] = y;
+                for (size_t ch = 0; ch < osCh; ++ch)
+                {
+                    float* data = osBlock.getChannelPointer (ch);
+                    void* st = (void*) &presetState[juce::jmin ((size_t) 1, ch)];
+
+                    for (size_t n = 0; n < osSamples; ++n)
+                    {
+                        float x = plugin::sanitize (data[n]);
+                        x = preLP (x, (int) ch);
+                        x = driveSat.processSample (x, (int) ch, satParams);
+                        if (activePreset != nullptr && activePreset->process != nullptr)
+                            x = activePreset->process (st, x);
+                        data[n] = plugin::sanitize (x);
+                    }
+                }
             }
 
-            osAaLPz[juce::jlimit ((size_t) 0, (size_t) 1, ch)] = z;
+            // Anti-alias LP final en dominio oversampled
+            for (size_t ch = 0; ch < osCh; ++ch)
+            {
+                float* data = osBlock.getChannelPointer (ch);
+                float z = osAaLPz[juce::jlimit ((size_t) 0, (size_t) 1, ch)];
+
+                for (size_t n = 0; n < osSamples; ++n)
+                {
+                    const float y = (1.0f - aaA) * data[n] + aaA * z;
+                    z = y;
+                    data[n] = y;
+                }
+
+                osAaLPz[juce::jlimit ((size_t) 0, (size_t) 1, ch)] = z;
+            }
+
+            os->processSamplesDown (baseBlock);
         }
 
-oversampling->processSamplesDown (baseBlock);
-    }
-
-    // -------------------------------------------------------------------------
-    // 2.5) Tone POST (carácter / tame harshness con drive)
-    for (int i = 0; i < numSamples; ++i)
-    {
-        float yL = wetL[i];
-        yL = lowShelfPostL.processSample (yL);
-        yL = highShelfPostL.processSample (yL);
-        wetL[i] = yL;
-
-        if (wetR != nullptr)
+        // -------------------------------------------------------------------------
+        // 2.5) Tone POST
+        for (int i = 0; i < block; ++i)
         {
-            float yR = wetR[i];
-            yR = lowShelfPostR.processSample (yR);
-            yR = highShelfPostR.processSample (yR);
-            wetR[i] = yR;
+            float yL = wetL[i];
+            yL = lowShelfPostL.processSample (yL);
+            yL = highShelfPostL.processSample (yL);
+            wetL[i] = plugin::sanitize (yL);
+
+            if (wetR != nullptr)
+            {
+                float yR = wetR[i];
+                yR = lowShelfPostR.processSample (yR);
+                yR = highShelfPostR.processSample (yR);
+                wetR[i] = plugin::sanitize (yR);
+            }
         }
-    }
 
-    // -------------------------------------------------------------------------
-    // 3) Mix + AUTO-LEVEL (volumen constante) - ULTRA (por muestra)
-//
-// Objetivo: que el volumen se mantenga constante aunque muevas cualquier knob.
-// Este modo es muy estable en hosts con buffer variable (FL Studio, etc.).
-//
-// Medimos potencia (HP) de:
-//   - ENTRADA: dry ALINEADO con la latencia del oversampling (dryDelay)
-//   - SALIDA:  mixed PRE autogain
-// y aplicamos la ganancia compensatoria por muestra (con attack/release internos).
-//
-// ⚠️ Importante: la medición de salida es PRE gain para evitar auto-cancelación.
-
-    // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
-    auto* dL = dryDelayBuffer.getWritePointer (0);
-    auto* dR = (dryDelayBuffer.getNumChannels() > 1) ? dryDelayBuffer.getWritePointer (1) : nullptr;
-
-    const int size = dryDelayBuffer.getNumSamples();
-
-    for (int i = 0; i < numSamples; ++i)
-    {
-        const float mix01 = mixSm.process (mixTarget);
-
-        // ✅ DRY retrasado/alineado con oversampling
-        const int wp = dryDelayWritePos;
-        int rp = wp - dryDelaySamples;
-        if (rp < 0) rp += size;
-
-        // entrada actual (sin delay)
-        const float inL = ch0[i];
-        const float inR = (ch1 != nullptr) ? ch1[i] : inL;
-
-        // escribir entrada al delay
-        dL[wp] = inL;
-        if (dR != nullptr) dR[wp] = inR;
-
-        // leer dry alineado
-        const float dryL = dL[rp];
-        const float dryR = (dR != nullptr) ? dR[rp] : dryL;
-
-        // avanzar puntero
-        dryDelayWritePos = wp + 1;
-        if (dryDelayWritePos >= size) dryDelayWritePos = 0;
-
-        const float wetOutL = wetL[i];
-        const float wetOutR = (wetR != nullptr) ? wetR[i] : wetOutL;
-
-        // -----------------------------------------------------------------
-        // BYPASS EXACTO CUANDO MIX=0
-        //
-        // Si el usuario pone MIX=0, quiere el audio idéntico al original (sin
-        // autogain, sin safety clip, sin nada que cambie el nivel/tono).
-        // Igual actualizamos el autogain con dry->dry para que se mantenga en unity.
-        if (mix01 <= 1.0e-4f)
+        // -------------------------------------------------------------------------
+        // 3) Mix + AutoGain (por muestra) + latency padding fijo
+        for (int i = 0; i < block; ++i)
         {
-            (void) autoGain.processStereo (dryL, dryR, dryL, dryR);
-            ch0[i] = dryL;
+            const float mix01 = mixSm.process (mixTarget);
+
+            // ✅ DRY retrasado/alineado con oversampling (latencia REAL del modo activo)
+            const int wp = dryDelayWritePos;
+            int rp = wp - dryDelaySamples;
+            if (rp < 0) rp += drySize;
+
+            const float inL = ch0[offset + i];
+            const float inR = (ch1 != nullptr) ? ch1[offset + i] : inL;
+
+            dL[wp] = inL;
+            if (dR != nullptr) dR[wp] = inR;
+
+            const float dryL = dL[rp];
+            const float dryR = (dR != nullptr) ? dR[rp] : dryL;
+
+            dryDelayWritePos = wp + 1;
+            if (dryDelayWritePos >= drySize) dryDelayWritePos = 0;
+
+            const float wetOutL = wetL[i];
+            const float wetOutR = (wetR != nullptr) ? wetR[i] : wetOutL;
+
+            float outLpre = dryL;
+            float outRpre = dryR;
+
+            if (mix01 > 1.0e-4f)
+            {
+                outLpre = plugin::equalPowerMix (dryL, wetOutL, mix01);
+                outRpre = plugin::equalPowerMix (dryR, wetOutR, mix01);
+            }
+
+            const float g = autoGain.processStereo (dryL, dryR, outLpre, outRpre);
+
+            float outL = plugin::softClipSafety (outLpre * g);
+            float outR = plugin::softClipSafety (outRpre * g);
+
+            outL = plugin::sanitize (outL);
+            outR = plugin::sanitize (outR);
+
+            // Latency padding (para mantener latency fija = maxLatencySamples)
+            const int owp = outputDelayWritePos;
+            int orp = owp - outputPadSamples;
+            if (orp < 0) orp += outSize;
+
+            oL[owp] = outL;
+            if (oR != nullptr) oR[owp] = outR;
+
+            const float delayedL = oL[orp];
+            const float delayedR = (oR != nullptr) ? oR[orp] : delayedL;
+
+            outputDelayWritePos = owp + 1;
+            if (outputDelayWritePos >= outSize) outputDelayWritePos = 0;
+
+            ch0[offset + i] = delayedL;
             if (ch1 != nullptr)
-                ch1[i] = dryR;
-            continue;
+                ch1[offset + i] = delayedR;
         }
 
-        const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
-        const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
-
-        // AutoGain ULTRA: calcula ganancia desde dry vs mixed PRE gain
-        const float g = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
-
-        ch0[i] = plugin::softClipSafety (mixedL * g);
-        if (ch1 != nullptr)
-            ch1[i] = plugin::softClipSafety (mixedR * g);
+        offset += block;
     }
 }
 //==============================================================================
@@ -1055,3 +951,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
