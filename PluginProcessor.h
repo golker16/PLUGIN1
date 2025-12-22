@@ -152,7 +152,6 @@ private:
                 atan_x1[ch] = 0.0f;
             }
         }
-        }
 
         static inline Params makeParams (float drive01) noexcept
         {
@@ -689,5 +688,6 @@ double sr = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (YourPluginAudioProcessor)
 };
+
 
 
