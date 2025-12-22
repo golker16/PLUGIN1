@@ -11,6 +11,101 @@
  #include "BinaryData.h"
 #endif
 
+//------------------------------------------------------------------------------
+// Fuente embebida en assets/ (TTF/OTF) -> Typeface global (sin setTypefacePtr)
+#ifndef PLUGIN_HAS_FONT
+ #define PLUGIN_HAS_FONT 0
+#endif
+
+#if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
+ #ifndef PLUGIN_PRIMARY_FONT_FILENAME
+  #define PLUGIN_PRIMARY_FONT_FILENAME ""
+ #endif
+#endif
+
+namespace plugin { namespace ui {
+
+static juce::StringArray makeBinaryDataNameCandidates (juce::String fileName)
+{
+    // fileName: solo nombre (ej. "MiFuente.ttf")
+    fileName = fileName.trim();
+
+    auto sanitize = [] (juce::String s)
+    {
+        s = s.replaceCharacter ('.', '_')
+             .replaceCharacter ('-', '_')
+             .replaceCharacter (' ', '_');
+
+        juce::String out;
+        out.preallocateBytes ((size_t) s.getNumBytesAsUTF8());
+
+        for (auto c : s)
+        {
+            if (juce::CharacterFunctions::isLetterOrDigit (c) || c == '_')
+                out += juce::String::charToString ((juce::juce_wchar) c);
+            else
+                out += "_";
+        }
+
+        // JUCE a veces prefija '_' si el nombre no puede ser un identificador C++
+        if (out.isNotEmpty() && ! (juce::CharacterFunctions::isLetter (out[0]) || out[0] == '_'))
+            out = "_" + out;
+
+        return out;
+    };
+
+    juce::StringArray cands;
+    const auto base = sanitize (fileName);
+
+    // variantes comunes (case + prefijos)
+    cands.addIfNotAlreadyThere (base);
+    cands.addIfNotAlreadyThere (base.toLowerCase());
+    cands.addIfNotAlreadyThere (base.toUpperCase());
+
+    cands.addIfNotAlreadyThere ("_" + base);
+    cands.addIfNotAlreadyThere ("_" + base.toLowerCase());
+
+    cands.addIfNotAlreadyThere ("f_" + base);
+    cands.addIfNotAlreadyThere ("f_" + base.toLowerCase());
+
+    return cands;
+}
+
+static juce::Typeface::Ptr getEmbeddedPluginTypeface()
+{
+    static juce::Typeface::Ptr tf;
+    static bool tried = false;
+
+    if (tried)
+        return tf;
+
+    tried = true;
+
+   #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
+    const juce::String fontFile (PLUGIN_PRIMARY_FONT_FILENAME);
+
+    if (fontFile.isNotEmpty())
+    {
+        const auto candidates = makeBinaryDataNameCandidates (fontFile);
+
+        for (auto name : candidates)
+        {
+            int dataSize = 0;
+            if (auto* data = BinaryData::getNamedResource (name.toRawUTF8(), dataSize))
+            {
+                tf = juce::Typeface::createSystemTypefaceFor (data, (size_t) dataSize);
+                break;
+            }
+        }
+    }
+   #endif
+
+    return tf;
+}
+
+}} // namespace plugin::ui
+
+
 //==============================================================================
 // Parameters
 static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
@@ -53,6 +148,21 @@ namespace
 // Per-knob LookAndFeel: usa colours del Slider para (vacío/lleno)
 struct KnobLNF : public juce::LookAndFeel_V4
 {
+public:
+    KnobLNF()
+    {
+        // Carga Typeface embebida (si existe).
+        typeface = plugin::ui::getEmbeddedPluginTypeface();
+    }
+
+    juce::Typeface::Ptr getTypefaceForFont (const juce::Font& f) override
+    {
+        if (typeface != nullptr)
+            return typeface;
+        return juce::LookAndFeel_V4::getTypefaceForFont (f);
+    }
+
+
     void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPosProportional,
                            float rotaryStartAngle, float rotaryEndAngle,
@@ -101,6 +211,10 @@ struct KnobLNF : public juce::LookAndFeel_V4
 
         // ✅ manecilla eliminada -> solo vacío + relleno
     }
+
+private:
+    juce::Typeface::Ptr typeface;
+
 };
 
 //------------------------------------------------------------------------------
@@ -202,13 +316,6 @@ public:
         , toneKnob  ("Tone")
         , mixKnob   ("Mix")
     {
-        // ------------------------------------------------------------------
-        // Fuente global (desde /assets)
-        // - Aplica a TODO el texto (incluyendo el popup menu del ComboBox).
-        // - Si no hay fuente embebida, el LookAndFeel cae al default.
-        setLookAndFeel (&globalFontLNF);
-        preampBox.setLookAndFeel (&globalFontLNF);
-
         // LookAndFeel per knob (colores por slider)
         driveKnob.slider.setLookAndFeel (&knobLNF);
         toneKnob .slider.setLookAndFeel (&knobLNF);
@@ -231,6 +338,11 @@ public:
         driveKnob.label.setFont (juce::Font (11.0f));
         toneKnob .label.setFont (juce::Font (11.0f));
         mixKnob  .label.setFont (juce::Font (11.0f));
+
+        // Fuente embebida: aplica a texto de labels (y otros componentes que usen este L&F)
+        driveKnob.label.setLookAndFeel (&knobLNF);
+        toneKnob .label.setLookAndFeel (&knobLNF);
+        mixKnob  .label.setLookAndFeel (&knobLNF);
 
         addAndMakeVisible (driveKnob);
         addAndMakeVisible (toneKnob);
@@ -264,6 +376,9 @@ public:
 
         // ComboBox presets (mantiene el control)
         preampBox.setJustificationType (juce::Justification::centredLeft);
+
+        // Fuente embebida: ComboBox + menú desplegable usan el LookAndFeel del ComboBox
+        preampBox.setLookAndFeel (&knobLNF);
 
         int itemId = 1;
         for (const auto& it : PresetRegistry::items)
@@ -300,12 +415,16 @@ public:
     ~MinimalEditor() override
     {
         header.stop();
+
+        // Limpieza L&F (importante para evitar dangling pointers)
+        preampBox.setLookAndFeel (nullptr);
+        driveKnob.label.setLookAndFeel (nullptr);
+        toneKnob .label.setLookAndFeel (nullptr);
+        mixKnob  .label.setLookAndFeel (nullptr);
+
         driveKnob.slider.setLookAndFeel (nullptr);
         toneKnob .slider.setLookAndFeel (nullptr);
         mixKnob  .slider.setLookAndFeel (nullptr);
-
-        preampBox.setLookAndFeel (nullptr);
-        setLookAndFeel (nullptr);
     }
 
     void paint (juce::Graphics& g) override
@@ -354,8 +473,6 @@ public:
 
 private:
     YourPluginAudioProcessor& processor;
-
-    plugin::ui::GlobalFontLookAndFeel globalFontLNF;
 
     KnobLNF knobLNF;
 
