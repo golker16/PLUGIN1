@@ -45,11 +45,12 @@ public:
 private:
     void updateTiltCoeffs (float tone01);
 
-    // Oversampling helpers
-    int  getRequestedOversamplingExponent() const noexcept;
-    void ensureOversamplersPrepared (int channels, int maxBlockSize) noexcept;
-    void applyOversamplingSetting (int newExponent, bool force) noexcept;
-    void ensureDelayBufferCapacity (int channels) noexcept;
+
+    // Oversampling selector (0=x1, 1=x2, 2=x4, 3=x8)
+    int  getDesiredOversamplingIndex() const noexcept;
+    void ensureOversamplers (int numChannels);
+    void initOversamplers (int maxBlockSize);
+    void applyOversamplingIndex (int newIndex, bool force);
 
     //==============================================================================
     // ✅ StereoInteract (PRO): crosstalk freq+nivel + micro allpass (fase/latencia muy leve)
@@ -229,7 +230,8 @@ private:
     std::atomic<float>* pTone   = nullptr;
     std::atomic<float>* pMix    = nullptr;
     std::atomic<float>* pPreamp = nullptr;
-    std::atomic<float>* pOversampling = nullptr; // Choice index: 0=x1, 1=x2, 2=x4, 3=x8
+
+    std::atomic<float>* pOS     = nullptr;
 
     // Smoothers
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> driveSm;
@@ -239,17 +241,12 @@ private:
     // Tilt EQ (pre)
     juce::dsp::IIR::Filter<float> lowShelfL, lowShelfR;
     juce::dsp::IIR::Filter<float> highShelfL, highShelfR;
-
-    // Oversampling (seleccionable: x1/x2/x4/x8)
-    // - Para evitar allocs en audio thread al cambiar el selector, pre-creamos x2/x4/x8
-    //   y solo conmutamos el puntero activo.
-    // - x1 => oversampling == nullptr (procesamos a SR base)
-    std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, 4> oversamplers;
-    juce::dsp::Oversampling<float>* oversampling = nullptr; // puntero activo (no owning)
-    int currentOsExponent = 3;   // default: x8 (comportamiento anterior)
-    int oversamplingChannels = 0;
-    int oversamplingMaxBlockPrepared = 0;
-    int maxOsLatencySamples = 0; // latencia máxima (x8) para dimensionar el delay
+    // Oversampling (seleccionable en runtime)
+    static constexpr int kMaxOversamplingIndex = 3; // x8
+    std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, 4> oversamplers; // [0]=nullptr, [1]=x2, [2]=x4, [3]=x8
+    juce::dsp::Oversampling<float>* oversampling = nullptr; // non-owning, apunta al oversampler activo
+    int currentOSIndex = 3;
+    int oversamplerChannels = 2;
     juce::AudioBuffer<float> wetBuffer;
 
     // En algunos hosts (incl. FL Studio) el tamaño de bloque puede variar.
@@ -257,7 +254,6 @@ private:
     int maxBlockSizePrepared = 0;
 
     // ✅ 3.1) Dry delay para alinear con latencia del oversampling (solo necesario si usas MIX)
-    // Nota: el buffer se dimensiona con maxOsLatencySamples para evitar reallocs al cambiar OS.
     juce::AudioBuffer<float> dryDelayBuffer;
     int dryDelayWritePos   = 0;
     int dryDelaySamples    = 0;
@@ -282,6 +278,7 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (YourPluginAudioProcessor)
 };
+
 
 
 
