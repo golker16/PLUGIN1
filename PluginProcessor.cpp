@@ -515,9 +515,25 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     // ✅ A) Preparar módulo de interacción estéreo PRO al SR oversampled
     stereoInteract.prepare (osSr);
 
-    // Limpia storage de estados
+    // ---------------------------------------------------------------------
+    // Preset state lifecycle
+    //
+    // prepareToPlay() puede llamarse múltiples veces. Si ya teníamos un preset
+    // activo, destruimos los estados construidos para evitar UB.
+    if (activePreset != nullptr && activePreset->destruct != nullptr)
+    {
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            if (presetStateConstructed[(size_t) ch])
+                activePreset->destruct ((void*) &presetState[(size_t) ch]);
+        }
+    }
+
+    presetStateConstructed = {{ false, false }};
+
+    // Limpia bytes (no es estrictamente necesario, pero deja todo en un estado limpio)
     for (auto& st : presetState)
-        std::memset (&st, 0, sizeof(st));
+        std::memset (&st, 0, sizeof (st));
 
     // ---- PRESET inicial (blindado) ----
     activePresetIndex = -1;
@@ -536,6 +552,11 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
         for (int ch = 0; ch < 2; ++ch)
         {
             void* st = (void*) &presetState[(size_t) ch];
+            if (activePreset->construct != nullptr)
+            {
+                activePreset->construct (st);
+                presetStateConstructed[(size_t) ch] = true;
+            }
             if (activePreset->prepare) activePreset->prepare (st, osSr);
             if (activePreset->reset)   activePreset->reset (st);
         }
@@ -588,6 +609,18 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     if ((activePreset == nullptr || preampIndex != activePresetIndex) && PresetRegistry::items.size() > 0)
     {
+        // Destruir estado anterior antes de cambiar de preset
+        if (activePreset != nullptr && activePreset->destruct != nullptr)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                if (presetStateConstructed[(size_t) ch])
+                    activePreset->destruct ((void*) &presetState[(size_t) ch]);
+            }
+        }
+
+        presetStateConstructed = {{ false, false }};
+
         activePresetIndex = preampIndex;
         activePreset = &PresetRegistry::items[(size_t) preampIndex];
 
@@ -600,6 +633,11 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         for (int ch = 0; ch < 2; ++ch)
         {
             void* st = (void*) &presetState[(size_t) ch];
+            if (activePreset->construct != nullptr)
+            {
+                activePreset->construct (st);
+                presetStateConstructed[(size_t) ch] = true;
+            }
             if (activePreset->prepare) activePreset->prepare (st, osSr);
             if (activePreset->reset)   activePreset->reset (st);
         }
@@ -767,5 +805,7 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
+
 
 
