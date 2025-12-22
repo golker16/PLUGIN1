@@ -1,6 +1,18 @@
 #include "PluginProcessor.h"
 #include <cstring> // std::memset
+#include <atomic>
 
+
+
+// -----------------------------------------------------------------------------
+// Fallbacks to keep PluginProcessor.cpp self-contained even if the header was not
+// updated yet. If the class already defines these members/constants, those will
+// be used instead (member lookup wins over globals).
+namespace
+{
+    std::atomic<int> activeOSIndex { 1 }; // default HQ
+    constexpr int kNumOSModes = 3;
+}
 //------------------------------------------------------------------------------
 // Si CMake no define PLUGIN_HAS_ASSETS por alguna razón, no rompas el build:
 #ifndef PLUGIN_HAS_ASSETS
@@ -506,18 +518,37 @@ void YourPluginAudioProcessor::setStateInformation (const void* data, int sizeIn
 // RT-safe: NO crea Coefficients::Ptr nuevos por bloque.
 namespace
 {
-    inline void setBiquad (juce::dsp::IIR::Coefficients<float>& c,
-                           double b0, double b1, double b2,
-                           double a0, double a1, double a2) noexcept
+    
+inline void setBiquad (juce::dsp::IIR::Coefficients<float>& c,
+                       double b0, double b1, double b2,
+                       double a0, double a1, double a2) noexcept
+{
+    const double invA0 = (a0 != 0.0 ? 1.0 / a0 : 1.0);
+
+    // We write through getRawCoefficients() to avoid relying on internal layout/API differences
+    // between JUCE versions (and to avoid lvalue issues on some toolchains).
+    if (auto* p = c.getRawCoefficients())
     {
-        const double invA0 = (a0 != 0.0 ? 1.0 / a0 : 1.0);
-        // JUCE IIR biquad stores: { b0, b1, b2, a1, a2 } with a0 normalized to 1.
-        c.coefficients[0] = (float) (b0 * invA0);
-        c.coefficients[1] = (float) (b1 * invA0);
-        c.coefficients[2] = (float) (b2 * invA0);
-        c.coefficients[3] = (float) (a1 * invA0);
-        c.coefficients[4] = (float) (a2 * invA0);
+        // JUCE order: b0, b1, b2, a0, a1, a2
+        p[0] = (float) (b0 * invA0);
+        p[1] = (float) (b1 * invA0);
+        p[2] = (float) (b2 * invA0);
+        p[3] = 1.0f;
+        p[4] = (float) (a1 * invA0);
+        p[5] = (float) (a2 * invA0);
     }
+    else
+    {
+        // Extremely defensive fallback (should not happen).
+        // Avoids heap allocations: assigns into the existing object.
+        c = juce::dsp::IIR::Coefficients<float> ((float) (b0 * invA0),
+                                                (float) (b1 * invA0),
+                                                (float) (b2 * invA0),
+                                                1.0f,
+                                                (float) (a1 * invA0),
+                                                (float) (a2 * invA0));
+    }
+}
 
     // RBJ Audio EQ Cookbook shelf (S = shelf slope). We map JUCE's "Q" argument to S.
     inline void setLowShelf (juce::dsp::IIR::Coefficients<float>& c,
@@ -1078,5 +1109,6 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
 
 
