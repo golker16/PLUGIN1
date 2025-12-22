@@ -593,6 +593,11 @@ void YourPluginAudioProcessor::rebuildOversampling (int newExponent)
     stereoInteract.prepare (osSr);
     driveSat.prepare (osSr);
 
+    // Reset estados de filtros en dominio oversampled (evita clicks al cambiar calidad/SR)
+    preShaperLPz = {{ 0.0f, 0.0f }};
+    osAaLPz      = {{ 0.0f, 0.0f }};
+
+
     // Si hay preset activo, re-prepare al nuevo SR interno
     if (activePreset != nullptr)
     {
@@ -645,6 +650,11 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     const int choice = (pQuality != nullptr ? (int) std::round (pQuality->load()) : 1);
     const int exponent = juce::jlimit (1, 3, 1 + choice);
     rebuildOversampling (exponent);
+
+    // Reset por seguridad (prepareToPlay puede llamarse varias veces)
+    preShaperLPz = {{ 0.0f, 0.0f }};
+    osAaLPz      = {{ 0.0f, 0.0f }};
+
 
     // ahora que driveSat ya conoce osSr, actualiza Tone↔Drive correctamente
     updateToneCoeffs (pTone ? pTone->load() : 0.5f,
@@ -832,6 +842,44 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
         const auto satParams = DriveSaturator::makeParams (drive01ForBlock);
 
+        // ---------------------------------------------------------------------
+        // (PRO) Anti-alias upgrades:
+        //  - LP PRE-shaper dependiente de drive (mata fizz / reduce aliasing)
+        //  - LP final en dominio oversampled antes del downsample
+        const float d = juce::jlimit (0.0f, 1.0f, drive01ForBlock);
+        auto smoothstep = [] (float a, float b, float x)
+        {
+            const float t = juce::jlimit (0.0f, 1.0f, (x - a) / (b - a));
+            return t * t * (3.0f - 2.0f * t);
+        };
+
+        const float preAmt = smoothstep (0.55f, 1.00f, d);          // 0..1
+        const float baseNyq = 0.5f * (float) sr;
+
+        const float preHzTarget = 20000.0f - 12000.0f * preAmt;     // 20k -> 8k
+        const float preHz = juce::jlimit (5000.0f, 0.49f * baseNyq, preHzTarget);
+        const float preA  = std::exp (-2.0f * juce::MathConstants<float>::pi * preHz / osSr);
+
+        const float aaHz = 0.47f * baseNyq;                         // ~0.235*sr
+        const float aaA  = std::exp (-2.0f * juce::MathConstants<float>::pi * aaHz / osSr);
+
+        auto preLP = [&] (float x, int chIdx) noexcept
+        {
+            const int ch = juce::jlimit (0, 1, chIdx);
+            if (preAmt <= 1.0e-4f)
+            {
+                preShaperLPz[(size_t) ch] = x;
+                return x;
+            }
+
+            const float y = (1.0f - preA) * x + preA * preShaperLPz[(size_t) ch];
+            preShaperLPz[(size_t) ch] = y;
+
+            // crossfade: 100% lineal cuando preAmt==0
+            return x + preAmt * (y - x);
+        };
+
+
         // ✅ B) Loop por muestra con interacción estéreo PRO (si osCh == 2)
         if (osCh == 2)
         {
@@ -845,6 +893,10 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             {
                 float xL = L[n];
                 float xR = R[n];
+
+                // LP pre-shaper (drive-dependent)
+                xL = preLP (xL, 0);
+                xR = preLP (xR, 1);
 
                 stereoInteract.processSample (xL, xR);
 
@@ -871,7 +923,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
                 for (size_t n = 0; n < osSamples; ++n)
                 {
-                    float x = driveSat.processSample (data[n], (int) ch, satParams);
+                    float x = data[n];
+
+                    // LP pre-shaper (drive-dependent)
+                    x = preLP (x, (int) ch);
+
+                    x = driveSat.processSample (x, (int) ch, satParams);
                     if (activePreset != nullptr && activePreset->process != nullptr)
                         x = activePreset->process (st, x);
                     data[n] = x;
@@ -879,7 +936,26 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             }
         }
 
-        oversampling->processSamplesDown (baseBlock);
+        
+        // ---------------------------------------------------------------------
+        // (PRO) Anti-alias LP final en dominio oversampled (antes del downsample)
+        // Limpia energía > ~0.47*Nyquist(base) para que no "caiga" al bajar SR.
+        for (size_t ch = 0; ch < osCh; ++ch)
+        {
+            float* data = osBlock.getChannelPointer (ch);
+            float z = osAaLPz[juce::jlimit ((size_t) 0, (size_t) 1, ch)];
+
+            for (size_t n = 0; n < osSamples; ++n)
+            {
+                const float y = (1.0f - aaA) * data[n] + aaA * z;
+                z = y;
+                data[n] = y;
+            }
+
+            osAaLPz[juce::jlimit ((size_t) 0, (size_t) 1, ch)] = z;
+        }
+
+oversampling->processSamplesDown (baseBlock);
     }
 
     // -------------------------------------------------------------------------
