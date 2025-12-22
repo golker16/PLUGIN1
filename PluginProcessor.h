@@ -224,6 +224,9 @@ private:
     std::atomic<float>* pMix    = nullptr;
     std::atomic<float>* pPreamp = nullptr;
 
+    std::atomic<float>* pAutoGain = nullptr;
+    std::atomic<float>* pOutput   = nullptr;
+
     // Smoothers
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> driveSm;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> toneSm;
@@ -258,6 +261,8 @@ private:
     std::array<bool, 2> presetStateConstructed {{ false, false }};
 
     plugin::AutoGainExact autoGain;
+
+    bool lastAutoGainEnabled = true;
 
     // ✅ Nuevo: interacción estéreo PRO para oversampled
     StereoInteract stereoInteract;
