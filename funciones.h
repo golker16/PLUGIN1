@@ -6,6 +6,30 @@
 #include <JuceHeader.h>
 #include <cmath>
 
+//------------------------------------------------------------------------------
+// Assets / BinaryData
+// - PLUGIN_HAS_ASSETS: definido desde CMake cuando existe al menos 1 archivo
+//   dentro de /assets (PNGs y/o fuentes).
+// - PLUGIN_HAS_CUSTOM_FONT + PLUGIN_CUSTOM_FONT_RESOURCE: definidos desde CMake
+//   cuando existe al menos 1 .ttf/.otf en /assets.
+//
+// Si por alguna razón el build no define estas macros, no rompas la compilación.
+#ifndef PLUGIN_HAS_ASSETS
+ #define PLUGIN_HAS_ASSETS 0
+#endif
+
+#ifndef PLUGIN_HAS_CUSTOM_FONT
+ #define PLUGIN_HAS_CUSTOM_FONT 0
+#endif
+
+#ifndef PLUGIN_CUSTOM_FONT_RESOURCE
+ #define PLUGIN_CUSTOM_FONT_RESOURCE ""
+#endif
+
+#if PLUGIN_HAS_ASSETS
+ #include "BinaryData.h"
+#endif
+
 namespace plugin
 {
 //==============================================================================
@@ -434,6 +458,72 @@ private:
 // UI helpers
 namespace ui
 {
+//==============================================================================
+// GlobalFontLookAndFeel
+//
+// Permite forzar una fuente embebida (TTF/OTF) para TODO el texto del plugin,
+// incluyendo:
+// - Labels
+// - ComboBox (texto y popup menu)
+// - PopupMenu (items de menús plegables)
+//
+// Para activarlo:
+// 1) Copia una fuente .ttf/.otf dentro de /assets
+// 2) CMake detecta la primera fuente y define:
+//      PLUGIN_HAS_CUSTOM_FONT=1
+//      PLUGIN_CUSTOM_FONT_RESOURCE="Nombre_ttf"
+// 3) El editor aplica este LookAndFeel.
+struct GlobalFontLookAndFeel : juce::LookAndFeel_V4
+{
+    GlobalFontLookAndFeel()
+    {
+        customTypeface = loadTypefaceFromAssets();
+
+        // Si hay fuente, deja que la L&F la use en menús también.
+        // (El override de getTypefaceForFont ya cubre la mayoría de casos.)
+    }
+
+    juce::Typeface::Ptr getTypefaceForFont (const juce::Font& f) override
+    {
+        if (customTypeface != nullptr)
+            return customTypeface;
+
+        return juce::LookAndFeel_V4::getTypefaceForFont (f);
+    }
+
+    juce::Font getPopupMenuFont() override
+    {
+        auto f = juce::LookAndFeel_V4::getPopupMenuFont();
+        if (customTypeface != nullptr)
+            f.setTypefacePtr (customTypeface);
+        return f;
+    }
+
+    juce::Font getComboBoxFont (juce::ComboBox& box) override
+    {
+        auto f = juce::LookAndFeel_V4::getComboBoxFont (box);
+        if (customTypeface != nullptr)
+            f.setTypefacePtr (customTypeface);
+        return f;
+    }
+
+private:
+    static juce::Typeface::Ptr loadTypefaceFromAssets()
+    {
+       #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_CUSTOM_FONT
+        int dataSize = 0;
+        if (auto* data = BinaryData::getNamedResource (PLUGIN_CUSTOM_FONT_RESOURCE, dataSize))
+        {
+            if (dataSize > 0)
+                return juce::Typeface::createSystemTypefaceFor (data, (size_t) dataSize);
+        }
+       #endif
+        return {};
+    }
+
+    juce::Typeface::Ptr customTypeface;
+};
+
 struct SimpleKnobLookAndFeel : juce::LookAndFeel_V4
 {
     juce::Colour trackColour  = juce::Colour::fromRGB (45, 45, 45);
@@ -560,5 +650,4 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
-
 
