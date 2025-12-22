@@ -1,18 +1,6 @@
 #include "PluginProcessor.h"
 #include <cstring> // std::memset
-#include <atomic>
 
-
-
-// -----------------------------------------------------------------------------
-// Fallbacks to keep PluginProcessor.cpp self-contained even if the header was not
-// updated yet. If the class already defines these members/constants, those will
-// be used instead (member lookup wins over globals).
-namespace
-{
-    std::atomic<int> activeOSIndex { 1 }; // default HQ
-    constexpr int kNumOSModes = 3;
-}
 //------------------------------------------------------------------------------
 // Si CMake no define PLUGIN_HAS_ASSETS por alguna razón, no rompas el build:
 #ifndef PLUGIN_HAS_ASSETS
@@ -79,6 +67,15 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 
 namespace
 {
+//------------------------------------------------------------------------------
+// RT-safe helper: simple 1-pole lowpass smoother (no allocations).
+// a in (0..1): higher = faster.
+inline float onePoleLP (float x, float& z, float a) noexcept
+{
+    z += a * (x - z);
+    return z;
+}
+
 //------------------------------------------------------------------------------
 // Per-knob LookAndFeel: usa colours del Slider para (vacío/lleno)
 struct KnobLNF : public juce::LookAndFeel_V4
@@ -957,11 +954,11 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             const float inL = ch0[base + i];
             const float inR = (ch1 != nullptr) ? ch1[base + i] : inL;
 
-            float xL = lowShelfL.processSample (0, inL);
-            xL       = highShelfL.processSample (0, xL);
+            float xL = lowShelfL.processSample (inL);
+            xL       = highShelfL.processSample (xL);
 
-            float xR = lowShelfR.processSample (0, inR);
-            xR       = highShelfR.processSample (0, xR);
+            float xR = lowShelfR.processSample (inR);
+            xR       = highShelfR.processSample (xR);
 
             wetL[i] = xL;
             if (wetR != nullptr) wetR[i] = xR;
@@ -982,16 +979,16 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             float xR = (osCh > 1) ? osBlock.getSample (1, (size_t) i) : xL;
 
             // Pre shaper 1-pole LP (anti-alias)
-            xL = plugin::onePoleLP (xL, preShaperZ[0], 0.25f);
-            xR = plugin::onePoleLP (xR, preShaperZ[1], 0.25f);
+            xL = onePoleLP (xL, preShaperZ[0], 0.25f);
+            xR = onePoleLP (xR, preShaperZ[1], 0.25f);
 
             if (activePreset != nullptr)
             {
                 void* stL = (void*) &presetStateBank[(size_t) osIdx][0];
                 void* stR = (void*) &presetStateBank[(size_t) osIdx][1];
 
-                if (activePreset->processSample) xL = activePreset->processSample (stL, xL);
-                if (activePreset->processSample) xR = activePreset->processSample (stR, xR);
+                if (activePreset->process) xL = activePreset->process (stL, xL);
+                if (activePreset->process) xR = activePreset->process (stR, xR);
             }
 
             stereoInteract.processSample (xL, xR);
@@ -1000,8 +997,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             xR = driveSat.processSample (1, xR, satParams);
 
             // AA LP post non-linearity
-            xL = plugin::onePoleLP (xL, osAaZ[0], 0.15f);
-            xR = plugin::onePoleLP (xR, osAaZ[1], 0.15f);
+            xL = onePoleLP (xL, osAaZ[0], 0.15f);
+            xR = onePoleLP (xR, osAaZ[1], 0.15f);
 
             osBlock.setSample (0, (size_t) i, xL);
             if (osCh > 1)
@@ -1014,15 +1011,15 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         for (int i = 0; i < n; ++i)
         {
             float yL = wetL[i];
-            yL = lowShelfPostL.processSample (0, yL);
-            yL = highShelfPostL.processSample (0, yL);
+            yL = lowShelfPostL.processSample (yL);
+            yL = highShelfPostL.processSample (yL);
             wetL[i] = yL;
 
             if (wetR != nullptr)
             {
                 float yR = wetR[i];
-                yR = lowShelfPostR.processSample (0, yR);
-                yR = highShelfPostR.processSample (0, yR);
+                yR = lowShelfPostR.processSample (yR);
+                yR = highShelfPostR.processSample (yR);
                 wetR[i] = yR;
             }
         }
@@ -1109,6 +1106,5 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
 
 
