@@ -22,41 +22,44 @@ inline float softClipSafety (float x) noexcept
     return juce::jlimit (-1.0f, 1.0f, x);
 }
 
-// Drive 0..1 -> dB de pregain
+// Drive 0..1 -> dB de "input drive" real (musical, no lineal)
+//
+// Requerimiento PRO:
+// - Rango realista (0..30 dB típicamente 0..24/30).
+// - Mucho control fino al inicio y más agresión al final.
+// - Curva tipo potencia/log sin "explosión" repentina.
+//
+// Nota: esto solo mapea la perilla a dB.
+// El carácter/etapas del drive se implementan en el bloque no-lineal (DriveSaturator).
 inline float mapDriveDb (float drive01) noexcept
 {
-    // Objetivo:
-    // - Mejor resolución en valores bajos/medios ("sweet spot")
-    // - Menos "explosión" al final (más controlable en presets agresivos)
-    // - Misma idea: DRIVE es pregain para empujar el preset
-    //
-    // Curva exponencial normalizada (asintótica) + un pequeño componente lineal
-    // para que el control cerca de 0 siga siendo predecible.
     const float x = juce::jlimit (0.0f, 1.0f, drive01);
 
-    constexpr float k = 3.25f; // más alto = más resolución al inicio
-    const float expNorm = 1.0f - std::exp (-k);
-    const float expCurve = (1.0f - std::exp (-k * x)) / (expNorm > 0.0f ? expNorm : 1.0f);
+    // potencia: fino al inicio, más decisión al final
+    // (p > 1 => más resolución en valores bajos)
+    constexpr float p = 2.35f;
 
-    // Mezcla suave (evita que el final se sienta "todo o nada")
-    const float shaped = 0.18f * x + 0.82f * expCurve; // 0..1
+    // pequeño componente log para que la parte media se sienta "continua"
+    const float logCurve = std::log1p (9.0f * x) / std::log1p (9.0f); // 0..1
 
-    // Rango de pregain (dB): un poco más de headroom para empujar presets, sin volverse inusable.
-    return 36.0f * shaped; // 0..36 dB
+    const float shaped = 0.78f * std::pow (x, p) + 0.22f * logCurve;
+
+    // rango real de input drive
+    constexpr float maxDb = 30.0f;
+    return maxDb * shaped;
 }
 
 //==============================================================================
-// Tone 0..1 -> Tilt dB (neutral EXACTO en 0.5, con "dead-zone" alrededor)
+// Tone 0..1 -> Tilt dB (neutral EXACTO en 0.5, pivot musical)
 //
-// Requerimiento:
-// - En el centro (0.5) NO debe hacer nada.
-// - Hacia la derecha => sonido más oscuro.
-// - Hacia la izquierda => sonido más brillante.
+// Requerimiento PRO:
+// - En el centro (0.5) NO hace nada.
+// - Tilt tipo consola (no lowpass aburrido).
+// - Curva dinámica: en el centro casi plano, hacia extremos más efecto.
 //
-// Inspiración: el "Tone" tipo Decapitator, pero con una respuesta más robusta:
-// - dead-zone para que el centro sea realmente neutro
-// - curva no-lineal para que el movimiento se sienta musical
-// - rango asimétrico (típicamente conviene menos boost de brillo que de dark)
+// Nota:
+// - La ubicación del pivot/frecuencias la define el procesador (filtros).
+// - Aquí solo calculamos el tilt en dB.
 inline float mapToneTiltDb (float tone01) noexcept
 {
     const float t = juce::jlimit (0.0f, 1.0f, tone01);
@@ -64,29 +67,23 @@ inline float mapToneTiltDb (float tone01) noexcept
     // signed: -0.5..+0.5 (izq..der)
     float s = t - 0.5f;
 
-    // dead-zone alrededor del centro ("no hace nada")
-    constexpr float dead = 0.06f; // ~6% del recorrido total
+    // dead-zone alrededor del centro ("neutral real")
+    constexpr float dead = 0.055f; // ~5.5% del recorrido total
     if (std::abs (s) <= dead * 0.5f)
         return 0.0f;
 
-    // remap quitando la zona muerta
     const float sign = (s >= 0.0f ? 1.0f : -1.0f);
     const float mag  = (std::abs (s) - dead * 0.5f) / (0.5f - dead * 0.5f); // 0..1
 
-    // curva musical: suave al inicio, más decisión al final
-    constexpr float curve = 1.55f;
+    // curva musical (suave al inicio, más al final)
+    constexpr float curve = 1.60f;
     const float a = std::pow (juce::jlimit (0.0f, 1.0f, mag), curve);
 
-    // Asimetría deliberada:
-    // - Dark suele tolerar un poquito más (por distorsión/armónicos)
-    // - Bright conviene ser más conservador para evitar harsh
-    constexpr float maxDarkDb   = 9.0f;
-    constexpr float maxBrightDb = 7.0f;
+    // rango tilt (±12 dB)
+    constexpr float maxDb = 12.0f;
 
-    // Nota: derecha = oscuro (tilt NEGATIVO), izquierda = brillante (tilt POSITIVO)
-    if (sign > 0.0f)
-        return -maxDarkDb * a;
-    return  maxBrightDb * a;
+    // convención: derecha = oscuro (tilt NEGATIVO), izquierda = brillante (tilt POSITIVO)
+    return (sign > 0.0f) ? (-maxDb * a) : (maxDb * a);
 }
 
 // Mezcla equal-power
@@ -560,5 +557,7 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
+
+
 
 
