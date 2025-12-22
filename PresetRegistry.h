@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstddef>
+#include <new>
 #include <type_traits>
 
 // Presets disponibles
@@ -24,6 +25,10 @@ struct PresetRegistry
         const char* displayName = nullptr;
         std::size_t stateSize  = 1;
         std::size_t stateAlign = alignof (std::max_align_t);
+        // Lifecycle del State (para soportar State con inicializadores / miembros no POD)
+        void  (*construct)(void* state) = nullptr;
+        void  (*destruct) (void* state) = nullptr;
+
         void  (*prepare)(void* state, float sr) = nullptr;
         void  (*reset)  (void* state) = nullptr;
         float (*process)(void* state, float x) = nullptr;
@@ -32,15 +37,25 @@ struct PresetRegistry
     template <typename Preset>
     static Item make() noexcept
     {
-        static_assert (std::is_trivially_default_constructible_v<typename Preset::State>,
-                       "Preset::State must be trivially default constructible");
-        static_assert (std::is_trivially_destructible_v<typename Preset::State>,
-                       "Preset::State must be trivially destructible");
+        // Nota: muchos States usan in-class initializers (no son *trivially* constructible).
+        // Por eso construimos/destruimos explícitamente con placement-new.
+        static_assert (std::is_nothrow_default_constructible_v<typename Preset::State>,
+                       "Preset::State must be nothrow default constructible");
+        static_assert (std::is_nothrow_destructible_v<typename Preset::State>,
+                       "Preset::State must be nothrow destructible");
 
         return Item {
             Preset::kDisplayName,
             sizeof (typename Preset::State),
             alignof (typename Preset::State),
+            +[](void* st)
+            {
+                new (st) typename Preset::State();
+            },
+            +[](void* st)
+            {
+                reinterpret_cast<typename Preset::State*> (st)->~State();
+            },
             +[](void* st, float sr)
             {
                 auto& s = *reinterpret_cast<typename Preset::State*> (st);
