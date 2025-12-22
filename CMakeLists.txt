@@ -172,4 +172,3 @@ target_link_libraries(PluginSaturador1 PRIVATE
   juce::juce_recommended_warning_flags
   juce::juce_recommended_lto_flags
 )
-
