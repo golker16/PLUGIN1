@@ -44,7 +44,7 @@ public:
 
 private:
     void updateToneCoeffs (float tone01, float drive01);
-    void rebuildOversampling (int newExponent);
+    void prepareOversamplingConfigs();
 
     //==============================================================================
     // ✅ Anti-zipper PRO: smoothing + slew limiter dependiente de magnitud
@@ -151,7 +151,6 @@ private:
                 tanh_x2[ch] = 0.0f;
                 atan_x1[ch] = 0.0f;
             }
-        }
         }
 
         static inline Params makeParams (float drive01) noexcept
@@ -627,21 +626,30 @@ private:
     juce::dsp::IIR::Filter<float> lowShelfPostL, lowShelfPostR;
     juce::dsp::IIR::Filter<float> highShelfPostL, highShelfPostR;
 
-    // Oversampling (solo bloque no lineal). Exponente: 1=2x, 2=4x, 3=8x
-    int osExponent = 2; // default 4x
-    int osExponentPrepared = -1;
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversampling;
-    juce::AudioBuffer<float> wetBuffer;
+    
+// Oversampling (solo bloque no lineal).
+// Pre-creamos 2x/4x/8x en prepareToPlay() y en audio thread solo switcheamos punteros.
+// 0=2x, 1=4x, 2=8x
+std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, 3> oversamplingConfigs;
+int maxLatencySamples = 0;          // fijo al máximo (8x) para estabilidad
+int currentOSLatencySamples = 0;    // latencia real del modo activo (para alinear DRY)
 
-    // En algunos hosts (incl. FL Studio) el tamaño de bloque puede variar.
-    // Guardamos el máximo inicial para poder re-inicializar buffers/OS si crece.
-    int maxBlockSizePrepared = 0;
+juce::AudioBuffer<float> wetBuffer;
 
+// Prealloc RT-safe: usamos un block size "seguro" en prepareToPlay() y procesamos en chunks.
+int maxBlockSizePrepared = 0;
     // ✅ 3.1) Dry delay para alinear con latencia del oversampling (solo necesario si usas MIX)
     juce::AudioBuffer<float> dryDelayBuffer;
     int dryDelayWritePos   = 0;
     int dryDelaySamples    = 0;
     int dryDelayBufferSize = 0;
+
+
+// ✅ Latency padding (para mantener latency FIXA = maxLatencySamples aunque bajes Quality)
+juce::AudioBuffer<float> outputDelayBuffer;
+int outputDelayWritePos   = 0;
+int outputDelayBufferSize = 0;
+int outputPadSamples      = 0; // maxLatencySamples - currentOSLatencySamples
 
     // Preset activo (stateful)
     const PresetRegistry::Item* activePreset = nullptr;
