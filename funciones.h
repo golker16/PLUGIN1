@@ -13,13 +13,24 @@ namespace plugin
 inline float softClipSafety (float x) noexcept
 {
     // IMPORTANTE:
-    // Esta función es un "safety" final, NO un saturador con make-up.
-    // La versión anterior normalizaba por tanh(k) y dejaba una pendiente > 1
-    // cerca de 0, lo que SUBÍA el volumen incluso con MIX=0.
+    // - Este es un "safety" FINAL para evitar hard-clamp (que genera aliasing).
+    // - 100% lineal dentro de [-1, +1].
+    // - Si |x| > 1, solo satura el "exceso" con una curva continua (C1) y con
+    //   pendiente 1 en el umbral (no cambia el volumen en el borde).
     //
-    // Mantén el audio 100% igual mientras esté dentro de [-1, +1]
-    // (lo normal en señal float). Solo limita si se pasa.
-    return juce::jlimit (-1.0f, 1.0f, x);
+    // Curva:
+    //   si |x| <= 1  -> x
+    //   si |x| > 1   -> sign(x) * ( 1 + excess/(1+excess) )
+    //
+    // Nota: limita suavemente hacia ±2 (suficiente como "safety" para floats).
+    const float ax = std::abs (x);
+    if (ax <= 1.0f)
+        return x;
+
+    const float s = (x >= 0.0f ? 1.0f : -1.0f);
+    const float excess = ax - 1.0f;
+    const float softExcess = excess / (1.0f + excess); // suave, continuo, d/dx=1 en excess=0
+    return s * (1.0f + softExcess);
 }
 
 // Drive 0..1 -> dB de "input drive" real (musical, no lineal)
