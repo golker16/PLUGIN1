@@ -128,6 +128,13 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.0001f),
         1.0f));
 
+    // Oversampling selector (para ahorrar CPU cuando no necesitas máxima calidad)
+    // 0=x1, 1=x2, 2=x4, 3=x8 (default x8 para conservar el comportamiento anterior)
+    params.push_back (std::make_unique<juce::AudioParameterChoice>(
+        "os", "Oversampling",
+        juce::StringArray { "x1", "x2", "x4", "x8" },
+        3));
+
     juce::StringArray preampChoices;
     for (const auto& it : PresetRegistry::items)
         preampChoices.add (it.displayName);
@@ -390,6 +397,19 @@ public:
 
         addAndMakeVisible (preampBox);
 
+        // ComboBox Oversampling (x1/x2/x4/x8)
+        osBox.setJustificationType (juce::Justification::centredLeft);
+
+        // Fuente embebida / mismo L&F que el resto
+        osBox.setLookAndFeel (&knobLNF);
+
+        osBox.addItem ("Oversampling x1", 1);
+        osBox.addItem ("Oversampling x2", 2);
+        osBox.addItem ("Oversampling x4", 3);
+        osBox.addItem ("Oversampling x8", 4);
+
+        addAndMakeVisible (osBox);
+
        #if PLUGIN_HAS_ASSETS
         modelImg = juce::ImageCache::getFromMemory (BinaryData::model_png, BinaryData::model_pngSize);
         modelImage.setImage (modelImg);
@@ -408,6 +428,7 @@ public:
         toneAtt   = std::make_unique<SliderAttachment>   (processor.apvts, "tone",   toneKnob.slider);
         mixAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
         preampAtt = std::make_unique<ComboBoxAttachment> (processor.apvts, "preamp", preampBox);
+        osAtt     = std::make_unique<ComboBoxAttachment> (processor.apvts, "os",     osBox);
 
         // ✅ UI más grande
         setSize (820, 460);
@@ -419,6 +440,7 @@ public:
 
         // Limpieza L&F (importante para evitar dangling pointers)
         preampBox.setLookAndFeel (nullptr);
+        osBox.setLookAndFeel (nullptr);
         driveKnob.label.setLookAndFeel (nullptr);
         toneKnob .label.setLookAndFeel (nullptr);
         mixKnob  .label.setLookAndFeel (nullptr);
@@ -469,6 +491,12 @@ public:
             modelImage.setBounds (left.reduced (2, 18));
        #endif
 
+        // --- Bottom row: [model.png] [Preamp] [Oversampling] ---
+        auto osArea = bottom.removeFromRight (190);
+        osBox.setBounds (osArea.reduced (0, 12));
+        // Deja espacio para dos combos: Preamp + Oversampling
+        auto osArea = bottom.removeFromRight (180);
+        osBox.setBounds (osArea.reduced (0, 12));
         preampBox.setBounds (bottom.reduced (0, 12));
     }
 
@@ -484,6 +512,7 @@ private:
     plugin::ui::LabeledKnob mixKnob;
 
     juce::ComboBox preampBox;
+    juce::ComboBox osBox;
 
    #if PLUGIN_HAS_ASSETS
     juce::ImageComponent modelImage;
@@ -492,6 +521,7 @@ private:
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> driveAtt, toneAtt, mixAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> preampAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> osAtt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MinimalEditor)
 };
@@ -509,6 +539,7 @@ YourPluginAudioProcessor::YourPluginAudioProcessor()
     pTone   = apvts.getRawParameterValue ("tone");
     pMix    = apvts.getRawParameterValue ("mix");
     pPreamp = apvts.getRawParameterValue ("preamp");
+    pOversampling = apvts.getRawParameterValue ("os");
 
 #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
     // Aplica una sola vez la fuente embebida como Sans Serif por defecto.
@@ -628,6 +659,160 @@ void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
 }
 
 //==============================================================================
+// Oversampling helpers
+int YourPluginAudioProcessor::getRequestedOversamplingExponent() const noexcept
+{
+    // Choice index: 0=x1, 1=x2, 2=x4, 3=x8
+    if (pOversampling == nullptr)
+        return 3;
+
+    const int idx = (int) std::lround (pOversampling->load());
+    return juce::jlimit (0, 3, idx);
+}
+
+void YourPluginAudioProcessor::ensureOversamplersPrepared (int channels, int maxBlockSize) noexcept
+{
+    channels = juce::jlimit (1, 2, channels);
+    maxBlockSize = juce::jmax (1, maxBlockSize);
+
+    const bool needRebuild = (oversamplingChannels != channels)
+                          || (oversamplers[1] == nullptr)
+                          || (oversamplers[2] == nullptr)
+                          || (oversamplers[3] == nullptr);
+
+    if (! needRebuild)
+    {
+        // Solo re-inicializa si cambió el max block (hosts con block variable).
+        // Evita hacer initProcessing en cada bloque (puede resetear filtros/buffers).
+        if (maxBlockSize != oversamplingMaxBlockPrepared)
+        {
+            for (int exp = 1; exp <= 3; ++exp)
+                if (oversamplers[exp] != nullptr)
+                    oversamplers[exp]->initProcessing ((size_t) maxBlockSize);
+
+            oversamplingMaxBlockPrepared = maxBlockSize;
+        }
+
+        // Latencia no cambia con el block size, pero mantenemos el "max" consistente
+        if (oversamplers[3] != nullptr)
+            maxOsLatencySamples = (int) oversamplers[3]->getLatencyInSamples();
+        return;
+    }
+
+    try
+    {
+        oversamplingChannels = channels;
+        oversamplingMaxBlockPrepared = maxBlockSize;
+
+        for (int exp = 1; exp <= 3; ++exp)
+        {
+            oversamplers[exp] = std::make_unique<juce::dsp::Oversampling<float>>(
+                (size_t) channels,
+                (size_t) exp,
+                juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+                true /* max quality */);
+
+            oversamplers[exp]->reset();
+            oversamplers[exp]->initProcessing ((size_t) maxBlockSize);
+        }
+
+        maxOsLatencySamples = oversamplers[3] != nullptr ? (int) oversamplers[3]->getLatencyInSamples() : 0;
+    }
+    catch (...)
+    {
+        // Si algo falla (OOM / etc.), degradamos a x1 (sin oversampling) de forma segura
+        for (int exp = 1; exp <= 3; ++exp)
+            oversamplers[exp].reset();
+
+        oversamplingChannels = channels;
+        oversamplingMaxBlockPrepared = maxBlockSize;
+        maxOsLatencySamples = 0;
+    }
+}
+
+void YourPluginAudioProcessor::ensureDelayBufferCapacity (int channels) noexcept
+{
+    channels = juce::jlimit (1, 2, channels);
+
+    const int neededSize = juce::jmax (1, maxBlockSizePrepared) + juce::jmax (0, maxOsLatencySamples) + 1;
+    const bool needsResize = (dryDelayBuffer.getNumChannels() != channels)
+                          || (dryDelayBuffer.getNumSamples() != neededSize);
+
+    if (! needsResize)
+    {
+        // Blindaje: si el writePos quedó fuera (por cualquier razón), lo reseteamos
+        dryDelayWritePos = juce::jlimit (0, dryDelayBuffer.getNumSamples() - 1, dryDelayWritePos);
+        return;
+    }
+
+    dryDelayBufferSize = neededSize;
+    try
+    {
+        dryDelayBuffer.setSize (channels, dryDelayBufferSize, false, false, true);
+        dryDelayBuffer.clear();
+    }
+    catch (...)
+    {
+        // Último recurso: buffer mínimo
+        dryDelayBufferSize = juce::jmax (1, maxBlockSizePrepared + 1);
+        dryDelayBuffer.setSize (channels, dryDelayBufferSize, false, false, true);
+        dryDelayBuffer.clear();
+    }
+
+    dryDelayWritePos = 0;
+}
+
+void YourPluginAudioProcessor::applyOversamplingSetting (int newExponent, bool force) noexcept
+{
+    newExponent = juce::jlimit (0, 3, newExponent);
+
+    if (! force && newExponent == currentOsExponent)
+        return;
+
+    currentOsExponent = newExponent;
+
+    // Conmutar oversampling activo (x1 => nullptr)
+    oversampling = (currentOsExponent == 0 ? nullptr : oversamplers[currentOsExponent].get());
+
+    // Si cambiamos de modo, resetea el oversampler activo para evitar residuos
+    if (oversampling != nullptr)
+        oversampling->reset();
+
+    const int newLatency = (oversampling != nullptr ? (int) oversampling->getLatencyInSamples() : 0);
+    setLatencySamples (newLatency);
+
+    // Latencia usada para alinear DRY vs WET
+    dryDelaySamples = newLatency;
+    dryDelaySamples = juce::jlimit (0, juce::jmax (0, maxOsLatencySamples), dryDelaySamples);
+
+    // SR interno (preset) depende del factor OS
+    // Si oversampling no está disponible por cualquier razón, NO inventes SR: usa base.
+    const float osFactor = (oversampling == nullptr ? 1.0f
+                                                   : (float) (1u << (unsigned) juce::jmax (0, currentOsExponent)));
+    osSr = (float) (sr * osFactor);
+
+    // Mantén StereoInteract alineado
+    stereoInteract.prepare (osSr);
+
+    // Si hay preset activo, re-alinea su SR interno para evitar inconsistencias
+    if (activePreset != nullptr)
+    {
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            if (! presetStateConstructed[(size_t) ch])
+                continue;
+
+            void* st = (void*) &presetState[(size_t) ch];
+            if (activePreset->prepare) activePreset->prepare (st, osSr);
+            if (activePreset->reset)   activePreset->reset   (st);
+        }
+    }
+
+    // Asegura capacidad del delay (dimensionado por max latency para evitar realloc al cambiar OS)
+    ensureDelayBufferCapacity (juce::jmax (1, juce::jmin (2, getTotalNumInputChannels())));
+}
+
+//==============================================================================
 // Prepare
 void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
@@ -638,9 +823,9 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
 
-    driveSm.setCurrentAndTargetValue (*pDrive);
-    toneSm .setCurrentAndTargetValue (*pTone);
-    mixSm  .setCurrentAndTargetValue (*pMix);
+    driveSm.setCurrentAndTargetValue (pDrive != nullptr ? *pDrive : 0.25f);
+    toneSm .setCurrentAndTargetValue (pTone  != nullptr ? *pTone  : 0.5f);
+    mixSm  .setCurrentAndTargetValue (pMix   != nullptr ? *pMix   : 1.0f);
 
     // Inicializa coef pointers (evita null)
     lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
@@ -648,7 +833,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
     highShelfR.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
 
-    updateTiltCoeffs (*pTone);
+    updateTiltCoeffs (pTone != nullptr ? *pTone : 0.5f);
 
     // ✅ AutoGain por bloque (entrada alineada vs salida real) para volumen constante
     autoGain.prepare (sr);
@@ -656,36 +841,20 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     // Guardar block size inicial (si el host luego usa uno mayor, creceremos buffers/OS)
     maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
 
-    // Oversampling (solo para WET)
-    const auto channels = (size_t) juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
-    oversampling = std::make_unique<juce::dsp::Oversampling<float>> (
-        channels,
-        kOversamplingExponent,
-        juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-        true /* max quality */);
+    // Oversampling (seleccionable: x1/x2/x4/x8)
+    const int channels = juce::jlimit (1, 2, getTotalNumInputChannels());
+    ensureOversamplersPrepared (channels, maxBlockSizePrepared);
 
-    oversampling->reset();
-    oversampling->initProcessing ((size_t) maxBlockSizePrepared);
-    setLatencySamples ((int) oversampling->getLatencyInSamples());
+    // Aplica selector (default x8 para mantener el comportamiento anterior)
+    applyOversamplingSetting (getRequestedOversamplingExponent(), true /*force*/);
 
-    // ✅ 3.2) Inicializar dry delay justo después de setLatencySamples(...)
-    dryDelaySamples    = (int) oversampling->getLatencyInSamples();
-    dryDelayWritePos   = 0;
-    dryDelayBufferSize = maxBlockSizePrepared + dryDelaySamples + 1;
-
-    dryDelayBuffer.setSize ((int) channels, dryDelayBufferSize, false, false, true);
+    // ✅ 3.2) Inicializar dry delay (dimensionado a latencia máxima para evitar reallocs)
+    ensureDelayBufferCapacity (channels);
     dryDelayBuffer.clear();
+    dryDelayWritePos = 0;
 
     // buffers
-    wetBuffer.setSize ((int) juce::jmax ((size_t)1, juce::jmin ((size_t)2, channels)),
-                       maxBlockSizePrepared, false, false, true);
-
-    // sample rate interno del preset (oversampled) - NO hardcode
-    const float osFactor = (float) (1u << kOversamplingExponent);
-    osSr = (float) (sr * osFactor);
-
-    // ✅ A) Preparar módulo de interacción estéreo PRO al SR oversampled
-    stereoInteract.prepare (osSr);
+    wetBuffer.setSize (channels, maxBlockSizePrepared, false, false, true);
 
     // ---------------------------------------------------------------------
     // Preset state lifecycle
@@ -744,24 +913,54 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     const int numCh = buffer.getNumChannels();
     const int numSamples = buffer.getNumSamples();
 
+    // Solo procesamos hasta estéreo internamente
+    const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
+
+    // 0=x1, 1=x2, 2=x4, 3=x8
+    const int requestedOsExp = getRequestedOversamplingExponent();
+
+    // Asegura que los oversamplers estén construidos/preparados para este layout/buffer.
+    const int oldOsChannels = oversamplingChannels;
+    const int oldOsMaxBlock = oversamplingMaxBlockPrepared;
+
     // FL Studio y otros hosts pueden variar el block size. Si crece,
     // re-inicializamos oversampling y buffers para evitar desalineaciones.
     if (numSamples > maxBlockSizePrepared)
     {
         maxBlockSizePrepared = numSamples;
-        if (oversampling != nullptr)
-            oversampling->initProcessing ((size_t) maxBlockSizePrepared);
 
-        // crecer wetBuffer (pre OS)
-        const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
+        // Re-prepara oversamplers para el nuevo max block
+        ensureOversamplersPrepared (wetCh, maxBlockSizePrepared);
+
+        // Puede cambiar la latencia/OS (o recrearse los objetos), fuerza re-sync
+        applyOversamplingSetting (requestedOsExp, true /*force*/);
+
+        // crecer buffers (pre OS + dry delay)
         wetBuffer.setSize (wetCh, maxBlockSizePrepared, false, false, true);
-
-        // crecer delay para DRY alineado
-        dryDelayBufferSize = maxBlockSizePrepared + dryDelaySamples + 1;
-        dryDelayBuffer.setSize (wetCh, dryDelayBufferSize, false, false, true);
+        ensureDelayBufferCapacity (wetCh);
         dryDelayBuffer.clear();
         dryDelayWritePos = 0;
     }
+    else
+    {
+        // Maneja cambios de layout (mono<->stereo) o cambio de selector OS en runtime
+        ensureOversamplersPrepared (wetCh, maxBlockSizePrepared);
+        const bool osRebuilt = (oversamplingChannels != oldOsChannels) || (oversamplingMaxBlockPrepared != oldOsMaxBlock);
+        const int prevExp = currentOsExponent;
+        applyOversamplingSetting (requestedOsExp, osRebuilt);
+
+        // Si cambió el modo OS, limpia el delay para que DRY/WET queden alineados inmediatamente
+        if (osRebuilt || currentOsExponent != prevExp)
+        {
+            ensureDelayBufferCapacity (wetCh);
+            dryDelayBuffer.clear();
+            dryDelayWritePos = 0;
+        }
+    }
+
+    // Blindaje: si el layout cambió, asegura wetBuffer con el #canales correcto
+    if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < maxBlockSizePrepared)
+        wetBuffer.setSize (wetCh, maxBlockSizePrepared, false, false, true);
 
     for (int ch = 2; ch < numCh; ++ch)
         buffer.clear (ch, 0, numSamples);
@@ -769,9 +968,9 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* ch0 = buffer.getWritePointer (0);
     auto* ch1 = (numCh > 1) ? buffer.getWritePointer (1) : nullptr;
 
-    driveSm.setTargetValue (*pDrive);
-    toneSm .setTargetValue (*pTone);
-    mixSm  .setTargetValue (*pMix);
+    driveSm.setTargetValue (pDrive != nullptr ? *pDrive : 0.25f);
+    toneSm .setTargetValue (pTone  != nullptr ? *pTone  : 0.5f);
+    mixSm  .setTargetValue (pMix   != nullptr ? *pMix   : 1.0f);
 
     // Selección de preset
     int preampIndex = 0;
@@ -796,10 +995,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         activePresetIndex = preampIndex;
         activePreset = &PresetRegistry::items[(size_t) preampIndex];
 
-        const float osFactor = (float) (1u << kOversamplingExponent);
-        osSr = (float) (sr * osFactor);
-
-        // ✅ Mantén stereoInteract alineado si cambia SR/OS (o si rearmas oversampling)
+        // ✅ Mantén stereoInteract alineado con el SR interno actual
+        // (osSr ya se calcula a partir del selector OS en applyOversamplingSetting)
         stereoInteract.prepare (osSr);
 
         for (int ch = 0; ch < 2; ++ch)
@@ -850,52 +1047,82 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // -------------------------------------------------------------------------
-    // 2) Oversampling -> preset PRO (stateful) -> downsample
-    if (oversampling != nullptr && activePreset != nullptr && activePreset->process != nullptr)
+    // 2) Oversampling (opcional) -> preset PRO (stateful) -> downsample
+    // - Si OS = x1 (oversampling == nullptr), procesamos directo a SR base.
+    if (activePreset != nullptr && activePreset->process != nullptr)
     {
-        juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
-
-        // procesamos SOLO numSamples (aunque wetBuffer sea más grande)
-        baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
-
-        auto osBlock = oversampling->processSamplesUp (baseBlock);
-
-        const size_t osSamples = osBlock.getNumSamples();
-        const size_t osCh = osBlock.getNumChannels();
-
-        // ✅ B) Loop por muestra con interacción estéreo PRO (si osCh == 2)
-        if (osCh == 2)
+        if (oversampling != nullptr)
         {
-            float* L = osBlock.getChannelPointer (0);
-            float* R = osBlock.getChannelPointer (1);
+            juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
 
-            void* stL = (void*) &presetState[0];
-            void* stR = (void*) &presetState[1];
+            // procesamos SOLO numSamples (aunque wetBuffer sea más grande)
+            baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
 
-            for (size_t n = 0; n < osSamples; ++n)
+            auto osBlock = oversampling->processSamplesUp (baseBlock);
+
+            const size_t osSamples = osBlock.getNumSamples();
+            const size_t osCh = osBlock.getNumChannels();
+
+            // ✅ B) Loop por muestra con interacción estéreo PRO (si osCh == 2)
+            if (osCh == 2)
             {
-                float xL = L[n];
-                float xR = R[n];
+                float* L = osBlock.getChannelPointer (0);
+                float* R = osBlock.getChannelPointer (1);
 
-                stereoInteract.processSample (xL, xR);
+                void* stL = (void*) &presetState[0];
+                void* stR = (void*) &presetState[1];
 
-                L[n] = activePreset->process (stL, xL);
-                R[n] = activePreset->process (stR, xR);
+                for (size_t n = 0; n < osSamples; ++n)
+                {
+                    float xL = L[n];
+                    float xR = R[n];
+
+                    stereoInteract.processSample (xL, xR);
+
+                    L[n] = activePreset->process (stL, xL);
+                    R[n] = activePreset->process (stR, xR);
+                }
             }
+            else
+            {
+                for (size_t ch = 0; ch < osCh; ++ch)
+                {
+                    float* data = osBlock.getChannelPointer (ch);
+                    void* st = (void*) &presetState[juce::jmin ((size_t) 1, ch)];
+
+                    for (size_t n = 0; n < osSamples; ++n)
+                        data[n] = activePreset->process (st, data[n]);
+                }
+            }
+
+            oversampling->processSamplesDown (baseBlock);
         }
         else
         {
-            for (size_t ch = 0; ch < osCh; ++ch)
+            // x1: procesa directo en wetBuffer (SR base)
+            if (wetR != nullptr)
             {
-                float* data = osBlock.getChannelPointer (ch);
-                void* st = (void*) &presetState[juce::jmin ((size_t) 1, ch)];
+                void* stL = (void*) &presetState[0];
+                void* stR = (void*) &presetState[1];
 
-                for (size_t n = 0; n < osSamples; ++n)
-                    data[n] = activePreset->process (st, data[n]);
+                for (int i = 0; i < numSamples; ++i)
+                {
+                    float xL = wetL[i];
+                    float xR = wetR[i];
+
+                    stereoInteract.processSample (xL, xR);
+
+                    wetL[i] = activePreset->process (stL, xL);
+                    wetR[i] = activePreset->process (stR, xR);
+                }
+            }
+            else
+            {
+                void* st = (void*) &presetState[0];
+                for (int i = 0; i < numSamples; ++i)
+                    wetL[i] = activePreset->process (st, wetL[i]);
             }
         }
-
-        oversampling->processSamplesDown (baseBlock);
     }
 
     // -------------------------------------------------------------------------
@@ -977,5 +1204,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
-
