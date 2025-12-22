@@ -103,6 +103,20 @@ static juce::Typeface::Ptr getEmbeddedPluginTypeface()
     return tf;
 }
 
+// Aplica la fuente del plugin como default global (para menús/listas/textos que
+// no tengan LookAndFeel propio). Se ejecuta 1 sola vez.
+static void applyGlobalPluginFontOnce()
+{
+    static bool done = false;
+    if (done)
+        return;
+
+    done = true;
+
+    if (auto tf = getEmbeddedPluginTypeface(); tf != nullptr)
+        juce::LookAndFeel::setDefaultSansSerifTypeface (tf);
+}
+
 }} // namespace plugin::ui
 
 
@@ -316,6 +330,10 @@ public:
         , toneKnob  ("Tone")
         , mixKnob   ("Mix")
     {
+        // ✅ Fuente default global: afecta listas/menús/popup text, etc.
+        // (sin tocar tu LookAndFeel específico para knobs).
+        plugin::ui::applyGlobalPluginFontOnce();
+
         // LookAndFeel per knob (colores por slider)
         driveKnob.slider.setLookAndFeel (&knobLNF);
         toneKnob .slider.setLookAndFeel (&knobLNF);
@@ -964,3 +982,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
