@@ -327,11 +327,19 @@ public:
 
     void reset()
     {
+        // Compat (mono/antiguo)
         inEnv  = 0.0f;
         outEnv = 0.0f;
 
         compGain   = 1.0f;
         targetGain = 1.0f;
+
+        // ✅ Estéreo robusto (por canal)
+        inEnvCh[0] = inEnvCh[1] = 0.0f;
+        outEnvCh[0] = outEnvCh[1] = 0.0f;
+
+        compGainCh[0] = compGainCh[1] = 1.0f;
+        targetGainCh[0] = targetGainCh[1] = 1.0f;
 
         in_hp_x1[0] = in_hp_x1[1] = 0.0f;
         in_hp_y1[0] = in_hp_y1[1] = 0.0f;
@@ -342,40 +350,62 @@ public:
     float getGain() const noexcept { return compGain; }
 
     // Procesa una muestra estéreo y devuelve la ganancia ACTUAL (ya suavizada)
+// (compatibilidad: devuelve el promedio de ambas ganancias)
     inline float processStereo (float dryL, float dryR, float outLpre, float outRpre) noexcept
     {
-        const float inL  = measureHP (dryL,    0, in_hp_x1,  in_hp_y1);
-        const float inR  = measureHP (dryR,    1, in_hp_x1,  in_hp_y1);
-        const float outL = measureHP (outLpre, 0, out_hp_x1, out_hp_y1);
-        const float outR = measureHP (outRpre, 1, out_hp_x1, out_hp_y1);
+    float gL = 1.0f, gR = 1.0f;
+    processStereoIndependent (dryL, dryR, outLpre, outRpre, gL, gR);
+    return 0.5f * (gL + gR);
+    }
 
-        const float pIn  = 0.5f * (inL  * inL  + inR  * inR);
-        const float pOut = 0.5f * (outL * outL + outR * outR);
+    // ✅ Estéreo robusto: procesa cada lado de forma independiente
+    inline void processStereoIndependent (float dryL, float dryR, float outLpre, float outRpre,
+                                     float& gainL, float& gainR) noexcept
+    {
+    const float inL  = measureHP (dryL,    0, in_hp_x1,  in_hp_y1);
+    const float inR  = measureHP (dryR,    1, in_hp_x1,  in_hp_y1);
+    const float outL = measureHP (outLpre, 0, out_hp_x1, out_hp_y1);
+    const float outR = measureHP (outRpre, 1, out_hp_x1, out_hp_y1);
 
-        // RMS envs
-        inEnv  = measAlpha * inEnv  + (1.0f - measAlpha) * pIn;
-        outEnv = measAlpha * outEnv + (1.0f - measAlpha) * pOut;
+    const float pInL  = inL  * inL;
+    const float pInR  = inR  * inR;
+    const float pOutL = outL * outL;
+    const float pOutR = outR * outR;
 
-        const bool gateOk = (inEnv > gatePow) && (outEnv > gatePow);
+    // RMS envs por canal
+    inEnvCh[0]  = measAlpha * inEnvCh[0]  + (1.0f - measAlpha) * pInL;
+    inEnvCh[1]  = measAlpha * inEnvCh[1]  + (1.0f - measAlpha) * pInR;
+    outEnvCh[0] = measAlpha * outEnvCh[0] + (1.0f - measAlpha) * pOutL;
+    outEnvCh[1] = measAlpha * outEnvCh[1] + (1.0f - measAlpha) * pOutR;
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        const bool gateOk = (inEnvCh[ch] > gatePow) && (outEnvCh[ch] > gatePow);
 
         if (gateOk)
         {
-            const float ratio = inEnv / (outEnv + 1.0e-20f);
+            const float ratio = inEnvCh[ch] / (outEnvCh[ch] + 1.0e-20f);
             float g = std::sqrt (ratio);
             g = juce::jlimit (minGain, maxGain, g);
-            targetGain = g;
+            targetGainCh[ch] = g;
         }
         else
         {
             // vuelve a unity cuando no hay señal útil
-            targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
+            targetGainCh[ch] = returnAlpha * targetGainCh[ch] + (1.0f - returnAlpha) * 1.0f;
         }
 
-        const bool needDown = (targetGain < compGain);
+        const bool needDown = (targetGainCh[ch] < compGainCh[ch]);
         const float a = needDown ? gainAttackAlpha : gainReleaseAlpha;
-        compGain = a * compGain + (1.0f - a) * targetGain;
+        compGainCh[ch] = a * compGainCh[ch] + (1.0f - a) * targetGainCh[ch];
+    }
 
-        return compGain;
+    gainL = compGainCh[0];
+    gainR = compGainCh[1];
+
+    // compat: valor "general" (por si alguien lo usa)
+    compGain   = 0.5f * (gainL + gainR);
+    targetGain = 0.5f * (targetGainCh[0] + targetGainCh[1]);
     }
 
     // --- ajustes ---
@@ -447,6 +477,12 @@ private:
     float inEnv  = 0.0f;
     float outEnv = 0.0f;
 
+    // ✅ Estéreo robusto (RMS + ganancia por canal)
+    float inEnvCh[2]  = { 0.0f, 0.0f };
+    float outEnvCh[2] = { 0.0f, 0.0f };
+
+    float compGainCh[2]   = { 1.0f, 1.0f };
+    float targetGainCh[2] = { 1.0f, 1.0f };
     float gainAttackAlpha  = 0.99f;
     float gainReleaseAlpha = 0.9995f;
     float returnAlpha      = 0.9999f;
