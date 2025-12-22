@@ -137,11 +137,27 @@ else()
   target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=0)
 endif()
 
-# 6) Fuente primaria: si hay al menos una, define su nombre de archivo para que el código la cargue
+# 6) Fuente primaria: si hay al menos una, define su nombre de archivo para que el código la cargue.
+#    Prioridad: si existe /assets/mi_fuente.ttf, úsala como default.
 #    Nota: el nombre de recurso interno de BinaryData es sanitizado; en código probamos varias variantes.
 if (PLUGIN_ASSET_FONTS_COUNT GREATER 0)
   list(SORT PLUGIN_ASSET_FONTS)
-  list(GET PLUGIN_ASSET_FONTS 0 PLUGIN_PRIMARY_FONT_PATH)
+
+  # Busca mi_fuente.ttf (case-insensitive). Si no está, cae al primer font ordenado.
+  set(PLUGIN_PRIMARY_FONT_PATH "")
+  foreach(_font_path IN LISTS PLUGIN_ASSET_FONTS)
+    get_filename_component(_font_name "${_font_path}" NAME)
+    string(TOLOWER "${_font_name}" _font_name_lc)
+    if (_font_name_lc STREQUAL "mi_fuente.ttf")
+      set(PLUGIN_PRIMARY_FONT_PATH "${_font_path}")
+      break()
+    endif()
+  endforeach()
+
+  if (PLUGIN_PRIMARY_FONT_PATH STREQUAL "")
+    list(GET PLUGIN_ASSET_FONTS 0 PLUGIN_PRIMARY_FONT_PATH)
+  endif()
+
   get_filename_component(PLUGIN_PRIMARY_FONT_FILENAME "${PLUGIN_PRIMARY_FONT_PATH}" NAME)
 
   message(STATUS "PLUGIN_PRIMARY_FONT_PATH     = ${PLUGIN_PRIMARY_FONT_PATH}")
