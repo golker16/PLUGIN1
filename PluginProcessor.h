@@ -255,6 +255,7 @@ private:
     using PresetStateStorage =
         std::aligned_storage_t<PresetRegistry::kMaxStateSize, PresetRegistry::kMaxStateAlign>;
     std::array<PresetStateStorage, 2> presetState {}; // hasta estéreo
+    std::array<bool, 2> presetStateConstructed {{ false, false }};
 
     plugin::AutoGainExact autoGain;
 
