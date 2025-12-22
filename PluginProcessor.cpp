@@ -619,9 +619,10 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .prepare (sr, 1.8f, 26.0f, 12.0f);
     mixSm  .prepare (sr, 1.2f, 18.0f, 20.0f);
 
-    driveSm.reset (pDrive ? *pDrive : 0.25f);
-    toneSm .reset (pTone  ? *pTone  : 0.5f);
-    mixSm  .reset (pMix   ? *pMix   : 1.0f);
+    // getRawParameterValue() devuelve std::atomic<float>* -> leer con .load()
+    driveSm.reset (pDrive ? pDrive->load() : 0.25f);
+    toneSm .reset (pTone  ? pTone ->load() : 0.5f);
+    mixSm  .reset (pMix   ? pMix  ->load() : 1.0f);
 
     // Inicializa coef pointers (evita null)
     lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 220.0f, 0.707f, 1.0f);
@@ -641,12 +642,13 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
 
     // Oversampling (solo bloque no lineal) según Quality
-    const int choice = (pQuality != nullptr ? (int) std::round (*pQuality) : 1);
+    const int choice = (pQuality != nullptr ? (int) std::round (pQuality->load()) : 1);
     const int exponent = juce::jlimit (1, 3, 1 + choice);
     rebuildOversampling (exponent);
 
     // ahora que driveSat ya conoce osSr, actualiza Tone↔Drive correctamente
-    updateToneCoeffs (pTone ? *pTone : 0.5f, pDrive ? *pDrive : 0.25f);
+    updateToneCoeffs (pTone ? pTone->load() : 0.5f,
+                      pDrive ? pDrive->load() : 0.25f);
 
     // ---------------------------------------------------------------------
     // Preset state lifecycle
@@ -675,7 +677,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                    (int) std::lround (*pPreamp));
+                                    (int) std::lround (pPreamp->load()));
 
     if (PresetRegistry::items.size() > 0)
     {
@@ -731,12 +733,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* ch1 = (numCh > 1) ? buffer.getWritePointer (1) : nullptr;
 
     // Targets (blindado por si el host llama sin parámetros aún)
-    const float driveTarget = (pDrive != nullptr ? *pDrive : 0.25f);
-    const float toneTarget  = (pTone  != nullptr ? *pTone  : 0.5f);
-    const float mixTarget   = (pMix   != nullptr ? *pMix   : 1.0f);
+    const float driveTarget = (pDrive != nullptr ? pDrive->load() : 0.25f);
+    const float toneTarget  = (pTone  != nullptr ? pTone ->load() : 0.5f);
+    const float mixTarget   = (pMix   != nullptr ? pMix  ->load() : 1.0f);
 
     // Quality: si cambia, reconstruimos oversampling SOLO para el bloque no lineal
-    const int choice = (pQuality != nullptr ? (int) std::round (*pQuality) : 1);
+    const int choice = (pQuality != nullptr ? (int) std::round (pQuality->load()) : 1);
     const int exponent = juce::jlimit (1, 3, 1 + choice);
     if (exponent != osExponentPrepared)
         rebuildOversampling (exponent);
@@ -745,7 +747,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                    (int) std::lround (*pPreamp));
+                                    (int) std::lround (pPreamp->load()));
 
     if ((activePreset == nullptr || preampIndex != activePresetIndex) && PresetRegistry::items.size() > 0)
     {
