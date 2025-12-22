@@ -33,14 +33,6 @@ inline float softClipSafety (float x) noexcept
     return s * (1.0f + softExcess);
 }
 
-//------------------------------------------------------------------------------
-// Sanitiza NaN/Inf (hardening PRO)
-inline float sanitize (float x) noexcept
-{
-    return std::isfinite (x) ? x : 0.0f;
-}
-
-
 // Drive 0..1 -> dB de "input drive" real (musical, no lineal)
 //
 // Requerimiento PRO:
@@ -66,43 +58,6 @@ inline float mapDriveDb (float drive01) noexcept
     // rango real de input drive
     constexpr float maxDb = 30.0f;
     return maxDb * shaped;
-}
-
-//------------------------------------------------------------------------------
-// Drive 0..1 -> pregain lineal (LUT, RT-safe)
-//
-// Evita log/pow por muestra (mapDriveDb + decibelsToGain).
-// La tabla se construye una vez (antes del audio thread).
-struct DrivePregainLUT
-{
-    static constexpr int kSize = 2048;
-    float table[(size_t) kSize] {};
-
-    DrivePregainLUT()
-    {
-        for (int i = 0; i < kSize; ++i)
-        {
-            const float x = (float) i / (float) (kSize - 1);
-            const float db = mapDriveDb (x);
-            // gain = 10^(db/20)  == exp2(db/6.020599913...)
-            table[(size_t) i] = std::exp2 (db / 6.0205999132796239f);
-        }
-    }
-
-    inline float get (float drive01) const noexcept
-    {
-        const float x = juce::jlimit (0.0f, 1.0f, drive01) * (float) (kSize - 1);
-        const int i0 = (int) x;
-        const int i1 = juce::jmin (kSize - 1, i0 + 1);
-        const float t = x - (float) i0;
-        return table[(size_t) i0] + t * (table[(size_t) i1] - table[(size_t) i0]);
-    }
-};
-
-inline float drive01ToPregainFast (float drive01) noexcept
-{
-    static const DrivePregainLUT lut;
-    return lut.get (drive01);
 }
 
 //==============================================================================
@@ -142,20 +97,8 @@ inline float mapToneTiltDb (float tone01) noexcept
     return (sign > 0.0f) ? (-maxDb * a) : (maxDb * a);
 }
 
-// Mezcla equal-power (RT-cheap)
-//
-// Versión "fast": evita sin/cos por muestra usando sqrt (a^2 + b^2 = 1).
-// Si prefieres EXACTAMENTE la curva trig, usa equalPowerMixTrig().
+// Mezcla equal-power
 inline float equalPowerMix (float dry, float wet, float mix01) noexcept
-{
-    const float m = juce::jlimit (0.0f, 1.0f, mix01);
-    const float a = std::sqrt (1.0f - m);
-    const float b = std::sqrt (m);
-    return dry * a + wet * b;
-}
-
-// Curva trig clásica (más cara).
-inline float equalPowerMixTrig (float dry, float wet, float mix01) noexcept
 {
     const float m = juce::jlimit (0.0f, 1.0f, mix01);
     const float a = std::cos (0.5f * juce::MathConstants<float>::pi * m);
@@ -625,6 +568,9 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
+
+
+
 
 
 
