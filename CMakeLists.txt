@@ -57,7 +57,7 @@ juce_add_plugin(PluginSaturador1
 juce_generate_juce_header(PluginSaturador1)
 
 # -----------------------------------------------------------------------------
-# Assets (PNG) -> JUCE BinaryData (DIAGNÓSTICO + GLOB ROBUSTO)
+# Assets (PNG + Fonts) -> JUCE BinaryData (DIAGNÓSTICO + GLOB ROBUSTO)
 # -----------------------------------------------------------------------------
 
 # --- Assets: carpeta base ---
@@ -70,7 +70,7 @@ if(NOT EXISTS "${PLUGIN_ASSETS_DIR}")
   message(FATAL_ERROR "No existe PLUGIN_ASSETS_DIR: '${PLUGIN_ASSETS_DIR}'")
 endif()
 
-# 2) Lista contenido (CI debug) SIN cmake -E ls (no existe en Windows CMake 3.31)
+# 2) Lista contenido (CI debug)
 message(STATUS "Listando contenido de assets (CI debug):")
 
 file(GLOB _ASSET_DEBUG_LIST
@@ -88,14 +88,13 @@ endif()
 
 unset(_ASSET_DEBUG_LIST)
 
-# 3) Glob robusto (incluye .png y .PNG, y reconfigura si cambian archivos)
+# 3) Globs robustos (incluyen mayúsculas, y reconfiguran si cambian archivos)
 file(GLOB_RECURSE PLUGIN_ASSET_PNGS
   CONFIGURE_DEPENDS
   "${PLUGIN_ASSETS_DIR}/*.png"
   "${PLUGIN_ASSETS_DIR}/*.PNG"
 )
 
-# 3b) Fonts (TTF/OTF) en assets (para UI)
 file(GLOB_RECURSE PLUGIN_ASSET_FONTS
   CONFIGURE_DEPENDS
   "${PLUGIN_ASSETS_DIR}/*.ttf"
@@ -104,18 +103,17 @@ file(GLOB_RECURSE PLUGIN_ASSET_FONTS
   "${PLUGIN_ASSETS_DIR}/*.OTF"
 )
 
-list(LENGTH PLUGIN_ASSET_PNGS PLUGIN_ASSET_PNGS_COUNT)
+list(LENGTH PLUGIN_ASSET_PNGS  PLUGIN_ASSET_PNGS_COUNT)
 list(LENGTH PLUGIN_ASSET_FONTS PLUGIN_ASSET_FONTS_COUNT)
-
-# 3c) Total assets (PNGs + fonts)
-set(PLUGIN_ASSET_FILES ${PLUGIN_ASSET_PNGS} ${PLUGIN_ASSET_FONTS})
-list(LENGTH PLUGIN_ASSET_FILES PLUGIN_ASSET_FILES_COUNT)
 
 message(STATUS "PLUGIN_ASSET_PNGS        = ${PLUGIN_ASSET_PNGS}")
 message(STATUS "PLUGIN_ASSET_PNGS_COUNT  = ${PLUGIN_ASSET_PNGS_COUNT}")
 message(STATUS "PLUGIN_ASSET_FONTS       = ${PLUGIN_ASSET_FONTS}")
 message(STATUS "PLUGIN_ASSET_FONTS_COUNT = ${PLUGIN_ASSET_FONTS_COUNT}")
-message(STATUS "PLUGIN_ASSET_FILES_COUNT = ${PLUGIN_ASSET_FILES_COUNT}")
+
+# 4) Unifica lista de assets embebibles
+set(PLUGIN_ASSET_FILES ${PLUGIN_ASSET_PNGS} ${PLUGIN_ASSET_FONTS})
+list(LENGTH PLUGIN_ASSET_FILES PLUGIN_ASSET_FILES_COUNT)
 
 if(PLUGIN_ASSET_FILES_COUNT EQUAL 0)
   message(WARNING
@@ -124,7 +122,7 @@ if(PLUGIN_ASSET_FILES_COUNT EQUAL 0)
   )
 endif()
 
-# 4) Si hay assets -> embebe en BinaryData + define macro
+# 5) Si hay assets -> embebe en BinaryData + define macros
 if (PLUGIN_ASSET_FILES_COUNT GREATER 0)
   juce_add_binary_data(PluginSaturador1_BinaryData
     SOURCES ${PLUGIN_ASSET_FILES}
@@ -139,31 +137,24 @@ else()
   target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=0)
 endif()
 
-# 4b) Si hay fuente(s) -> elige la primera (ordenada) y expón nombre de recurso
-# Nota: juce_add_binary_data genera nombres tipo "MyFont_ttf" (no "MyFont.ttf").
+# 6) Fuente primaria: si hay al menos una, define su nombre de archivo para que el código la cargue
+#    Nota: el nombre de recurso interno de BinaryData es sanitizado; en código probamos varias variantes.
 if (PLUGIN_ASSET_FONTS_COUNT GREATER 0)
   list(SORT PLUGIN_ASSET_FONTS)
-  list(GET PLUGIN_ASSET_FONTS 0 PLUGIN_FONT_PATH)
-  get_filename_component(PLUGIN_FONT_FILENAME "${PLUGIN_FONT_PATH}" NAME)
+  list(GET PLUGIN_ASSET_FONTS 0 PLUGIN_PRIMARY_FONT_PATH)
+  get_filename_component(PLUGIN_PRIMARY_FONT_FILENAME "${PLUGIN_PRIMARY_FONT_PATH}" NAME)
 
-  # resource name: reemplaza caracteres no válidos por '_' (incluye '.' -> '_')
-  set(PLUGIN_FONT_RESOURCE "${PLUGIN_FONT_FILENAME}")
-  string(REGEX REPLACE "[^A-Za-z0-9_]" "_" PLUGIN_FONT_RESOURCE "${PLUGIN_FONT_RESOURCE}")
-  # juce_add_binary_data tiende a normalizar a minúsculas en los nombres de recurso
-  string(TOLOWER "${PLUGIN_FONT_RESOURCE}" PLUGIN_FONT_RESOURCE)
-
-  message(STATUS "PLUGIN_FONT_FILENAME     = ${PLUGIN_FONT_FILENAME}")
-  message(STATUS "PLUGIN_FONT_RESOURCE     = ${PLUGIN_FONT_RESOURCE}")
+  message(STATUS "PLUGIN_PRIMARY_FONT_PATH     = ${PLUGIN_PRIMARY_FONT_PATH}")
+  message(STATUS "PLUGIN_PRIMARY_FONT_FILENAME = ${PLUGIN_PRIMARY_FONT_FILENAME}")
 
   target_compile_definitions(PluginSaturador1 PRIVATE
-    PLUGIN_HAS_CUSTOM_FONT=1
-    PLUGIN_CUSTOM_FONT_RESOURCE=\"${PLUGIN_FONT_RESOURCE}\"
+    PLUGIN_HAS_FONT=1
+    PLUGIN_PRIMARY_FONT_FILENAME="${PLUGIN_PRIMARY_FONT_FILENAME}"
   )
 else()
-  target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_CUSTOM_FONT=0)
+  target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_FONT=0)
 endif()
 
-#+#+#+#+---------------------------------------------------------------------------
 # Presets (SOURCE VERSION)
 #
 # En vez de autogenerar PresetRegistry.h en el build dir, mantenemos un
