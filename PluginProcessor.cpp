@@ -735,6 +735,21 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float wetOutL = wetL[i];
         const float wetOutR = (wetR != nullptr) ? wetR[i] : wetOutL;
 
+        // -----------------------------------------------------------------
+        // BYPASS EXACTO CUANDO MIX=0
+        //
+        // Si el usuario pone MIX=0, quiere el audio idéntico al original (sin
+        // autogain, sin safety clip, sin nada que cambie el nivel/tono).
+        // Igual actualizamos el autogain con dry->dry para que se mantenga en unity.
+        if (mix01 <= 1.0e-4f)
+        {
+            (void) autoGain.processStereo (dryL, dryR, dryL, dryR);
+            ch0[i] = dryL;
+            if (ch1 != nullptr)
+                ch1[i] = dryR;
+            continue;
+        }
+
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
@@ -752,4 +767,5 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
 
