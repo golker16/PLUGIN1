@@ -438,16 +438,46 @@ void YourPluginAudioProcessor::setStateInformation (const void* data, int sizeIn
 // Tilt
 void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
 {
+    // Tone "robusto" tipo tilt:
+    // - centro exacto (0.5) = neutro
+    // - derecha = oscuro, izquierda = brillante
+    // - curva + rango asimétrico (ver plugin::mapToneTiltDb)
     const float t = juce::jlimit (0.0f, 1.0f, tone01);
-    const float tiltDb = juce::jmap (t, 0.0f, 1.0f, -6.0f, 6.0f);
+    const float tiltDb = plugin::mapToneTiltDb (t);
 
-    const float fcLow  = 180.0f;
-    const float fcHigh = 3800.0f;
+    // Hacemos el tilt más estable/musical variando un poquito los puntos de shelf
+    // según cuánto te alejes del centro. Esto evita que se sienta como dos shelves
+    // rígidos y ayuda a que el control sea "piola" en cualquier preset.
+    const float mag01 = juce::jlimit (0.0f, 1.0f, std::abs (tiltDb) / 9.0f);
 
-    auto low  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, fcLow,  0.707f,
-                                                                    juce::Decibels::decibelsToGain (-tiltDb));
-    auto high = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, fcHigh, 0.707f,
-                                                                    juce::Decibels::decibelsToGain ( tiltDb));
+    // Valores base (calibrados para que no suene nasal/harsh)
+    const float fcLowBase  = 240.0f;
+    const float fcHighBase = 3200.0f;
+
+    // Con más tilt, acercamos un poco el high shelf hacia el medio (dark) o lo
+    // alejamos (bright). Low shelf también se mueve levemente para mantener pivot.
+    float fcLow  = fcLowBase;
+    float fcHigh = fcHighBase;
+
+    if (tiltDb < 0.0f) // dark
+    {
+        fcHigh = fcHighBase * (1.0f - 0.35f * mag01); // baja hasta ~65%
+        fcLow  = fcLowBase  * (1.0f + 0.20f * mag01); // sube levemente
+    }
+    else if (tiltDb > 0.0f) // bright
+    {
+        fcHigh = fcHighBase * (1.0f + 0.55f * mag01); // sube hasta ~155%
+        fcLow  = fcLowBase  * (1.0f - 0.15f * mag01); // baja levemente
+    }
+
+    fcLow  = juce::jlimit (90.0f,  650.0f, fcLow);
+    fcHigh = juce::jlimit (1200.0f, 8000.0f, fcHigh);
+
+    constexpr float q = 0.707f;
+    auto low  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (
+        sr, fcLow, q, juce::Decibels::decibelsToGain (-tiltDb));
+    auto high = juce::dsp::IIR::Coefficients<float>::makeHighShelf (
+        sr, fcHigh, q, juce::Decibels::decibelsToGain ( tiltDb));
 
     *lowShelfL.coefficients  = *low;
     *lowShelfR.coefficients  = *low;
@@ -805,7 +835,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
-
-
-
