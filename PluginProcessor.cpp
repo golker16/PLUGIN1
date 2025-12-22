@@ -547,9 +547,9 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
 
-    driveSm.setCurrentAndTargetValue (*pDrive);
-    toneSm .setCurrentAndTargetValue (*pTone);
-    mixSm  .setCurrentAndTargetValue (*pMix);
+    driveSm.setCurrentAndTargetValue (pDrive != nullptr ? pDrive->load() : 0.0f);
+    toneSm .setCurrentAndTargetValue (pTone  != nullptr ? pTone ->load() : 0.0f);
+    mixSm  .setCurrentAndTargetValue (pMix   != nullptr ? pMix  ->load() : 0.0f);
 
     // Inicializa coef pointers (evita null)
     lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
@@ -557,11 +557,11 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
     highShelfR.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
 
-    updateTiltCoeffs (*pTone);
+    updateTiltCoeffs (pTone != nullptr ? pTone->load() : 0.0f);
 
     // ✅ AutoGain por bloque (entrada alineada vs salida real) para volumen constante
     autoGain.prepare (sr);
-    lastAutoGainEnabled = (pAutoGain != nullptr && (*pAutoGain >= 0.5f));
+    lastAutoGainEnabled = (pAutoGain != nullptr && (pAutoGain->load() >= 0.5f));
 
     // Guardar block size inicial (si el host luego usa uno mayor, creceremos buffers/OS)
     maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
@@ -624,7 +624,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                    (int) std::lround (*pPreamp));
+                                    (int) std::lround (pPreamp->load()));
 
     if (PresetRegistry::items.size() > 0)
     {
@@ -679,24 +679,24 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* ch0 = buffer.getWritePointer (0);
     auto* ch1 = (numCh > 1) ? buffer.getWritePointer (1) : nullptr;
 
-    driveSm.setTargetValue (*pDrive);
-    toneSm .setTargetValue (*pTone);
-    mixSm  .setTargetValue (*pMix);
+    driveSm.setTargetValue (pDrive != nullptr ? pDrive->load() : driveSm.getTargetValue());
+    toneSm .setTargetValue (pTone  != nullptr ? pTone ->load() : toneSm .getTargetValue());
+    mixSm  .setTargetValue (pMix   != nullptr ? pMix  ->load() : mixSm  .getTargetValue());
 
-    const bool autoGainEnabled = (pAutoGain != nullptr && (*pAutoGain >= 0.5f));
+    const bool autoGainEnabled = (pAutoGain != nullptr && (pAutoGain->load() >= 0.5f));
     if (autoGainEnabled && ! lastAutoGainEnabled)
         autoGain.reset();
     lastAutoGainEnabled = autoGainEnabled;
 
     const float outputGain = (! autoGainEnabled && pOutput != nullptr)
-                           ? juce::Decibels::decibelsToGain (*pOutput)
+                           ? juce::Decibels::decibelsToGain (pOutput->load())
                            : 1.0f;
 
     // Selección de preset
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                    (int) std::lround (*pPreamp));
+                                    (int) std::lround (pPreamp->load()));
 
     if ((activePreset == nullptr || preampIndex != activePresetIndex) && PresetRegistry::items.size() > 0)
     {
@@ -735,7 +735,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // Tone smoothing real (por bloque) antes de usar tilt
-    toneSm.setTargetValue (*pTone);
+    toneSm.setTargetValue (pTone != nullptr ? pTone->load() : toneSm.getTargetValue());
     toneSm.skip (numSamples);
     updateTiltCoeffs (toneSm.getCurrentValue());
 
@@ -912,4 +912,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
