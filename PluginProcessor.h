@@ -89,7 +89,7 @@ private:
 
         void reset() noexcept
         {
-            envP = 0.0f;
+            envL = envR = envLR = 0.0f;
 
             // Mid band LPs por canal (para generar band)
             midHiLP[0] = midHiLP[1] = 0.0f;
@@ -112,21 +112,37 @@ private:
         inline void processSample (float& xL, float& xR) noexcept
         {
             // -------------------------
-            // 1) Nivel (para amount dependiente de drive/saturación)
-            const float p = 0.5f * (xL * xL + xR * xR);
-            envP = envAlpha * envP + (1.0f - envAlpha) * p;
+            // 1) Nivel + correlación (para respetar distribución estéreo del input)
+            const float pL  = xL * xL;
+            const float pR  = xR * xR;
+            const float pLR = xL * xR;
 
-            // level01: curva suave
-            const float rms = std::sqrt (envP + 1.0e-12f);
+            envL  = envAlpha * envL  + (1.0f - envAlpha) * pL;
+            envR  = envAlpha * envR  + (1.0f - envAlpha) * pR;
+            envLR = envAlpha * envLR + (1.0f - envAlpha) * pLR;
+
+            const float pAvg = 0.5f * (envL + envR);
+            const float rms  = std::sqrt (pAvg + 1.0e-12f);
+
             float level01 = rms * 1.25f;                  // calibración heurística
             level01 = juce::jlimit (0.0f, 1.0f, level01);
 
-            // amount base (muy sutil) + sube con nivel
+            // correlación normalizada (0 = wide/no correl, 1 = mono)
+            const float denom = std::sqrt (envL * envR + 1.0e-20f);
+            float corr = (denom > 0.0f ? (envLR / denom) : 0.0f);
+            corr = juce::jlimit (-1.0f, 1.0f, corr);
+
+            // factor de "link" (suave): crosstalk solo cuando el material es bastante correlacionado
+            const float corrAbs = std::abs (corr);
+            float t = (corrAbs - 0.20f) / (0.95f - 0.20f);
+            t = juce::jlimit (0.0f, 1.0f, t);
+            const float linked = t * t * (3.0f - 2.0f * t); // smoothstep
+
+            // amount base (muy sutil) + sube con nivel + se reduce si el input es wide
             const float ctBase = 0.0012f;
             const float ctMax  = 0.0032f;
-            const float ctAmt  = ctBase + (ctMax - ctBase) * (level01 * level01);
-
-            // -------------------------
+            const float ctAmt  = (ctBase + (ctMax - ctBase) * (level01 * level01)) * linked;
+// -------------------------
             // 2) Crosstalk dependiente de frecuencia
             // midBandOther = LP_hi(other) - LP_lo(other)
             // lowOther     = LP_low(other)
@@ -148,16 +164,23 @@ private:
 
             // -------------------------
             // 3) Micro allpass (fase) con tiny diferencia L/R
-            // coef base + variación por nivel (opuesta entre canales)
-            float aL = apBase + apVar * level01;
-            float aR = apBase - apVar * level01;
+            //
+            // Para respetar el panorama original cuando el material es wide/no correlacionado,
+            // aplicamos el micro-allpass SOLO si 'linked' es suficientemente alto.
+            if (linked > 0.05f)
+            {
+                // coef base + variación por nivel (opuesta entre canales)
+                const float apVarScaled = apVar * linked;
 
-            aL = juce::jlimit (0.10f, 0.95f, aL);
-            aR = juce::jlimit (0.10f, 0.95f, aR);
+                float aL = apBase + apVarScaled * level01;
+                float aR = apBase - apVarScaled * level01;
 
-            xL = allpass1 (xL, 0, aL);
-            xR = allpass1 (xR, 1, aR);
-        }
+                aL = juce::jlimit (0.10f, 0.95f, aL);
+                aR = juce::jlimit (0.10f, 0.95f, aR);
+
+                xL = allpass1 (xL, 0, aL);
+                xR = allpass1 (xR, 1, aR);
+            }}
 
     private:
         inline float alphaFromHz (float fc) const noexcept
@@ -206,7 +229,7 @@ private:
 
         // Nivel
         float envAlpha = 0.999f;
-        float envP = 0.0f;
+        float envL = envR = envLR = 0.0f;
 
         // Band shaping para crosstalk
         float midHiAlpha = 0.98f;
@@ -278,6 +301,7 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (YourPluginAudioProcessor)
 };
+
 
 
 
