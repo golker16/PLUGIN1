@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include <cstring> // std::memset
+#include <mutex>   // std::once_flag, std::call_once
 
 //------------------------------------------------------------------------------
 // Si CMake no define PLUGIN_HAS_ASSETS por alguna razón, no rompas el build:
@@ -101,20 +102,6 @@ static juce::Typeface::Ptr getEmbeddedPluginTypeface()
    #endif
 
     return tf;
-}
-
-// Aplica la fuente del plugin como default global (para menús/listas/textos que
-// no tengan LookAndFeel propio). Se ejecuta 1 sola vez.
-static void applyGlobalPluginFontOnce()
-{
-    static bool done = false;
-    if (done)
-        return;
-
-    done = true;
-
-    if (auto tf = getEmbeddedPluginTypeface(); tf != nullptr)
-        juce::LookAndFeel::setDefaultSansSerifTypeface (tf);
 }
 
 }} // namespace plugin::ui
@@ -330,10 +317,6 @@ public:
         , toneKnob  ("Tone")
         , mixKnob   ("Mix")
     {
-        // ✅ Fuente default global: afecta listas/menús/popup text, etc.
-        // (sin tocar tu LookAndFeel específico para knobs).
-        plugin::ui::applyGlobalPluginFontOnce();
-
         // LookAndFeel per knob (colores por slider)
         driveKnob.slider.setLookAndFeel (&knobLNF);
         toneKnob .slider.setLookAndFeel (&knobLNF);
@@ -526,6 +509,18 @@ YourPluginAudioProcessor::YourPluginAudioProcessor()
     pTone   = apvts.getRawParameterValue ("tone");
     pMix    = apvts.getRawParameterValue ("mix");
     pPreamp = apvts.getRawParameterValue ("preamp");
+
+#if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
+    // Aplica una sola vez la fuente embebida como Sans Serif por defecto.
+    // Esto afecta a menús/listas/popup menus y textos que usen el LookAndFeel default.
+    static std::once_flag sFontOnce;
+    std::call_once (sFontOnce, []()
+    {
+        if (auto tf = plugin::ui::loadPrimaryTypefaceFromBinaryData())
+            juce::Desktop::getInstance().getDefaultLookAndFeel().setDefaultSansSerifTypeface (tf);
+    });
+#endif
+
 }
 
 //==============================================================================
@@ -982,4 +977,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
