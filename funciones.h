@@ -12,8 +12,14 @@ namespace plugin
 // Soft clip final "safety"
 inline float softClipSafety (float x) noexcept
 {
-    const float k = 1.6f;
-    return std::tanh (k * x) / std::tanh (k);
+    // IMPORTANTE:
+    // Esta función es un "safety" final, NO un saturador con make-up.
+    // La versión anterior normalizaba por tanh(k) y dejaba una pendiente > 1
+    // cerca de 0, lo que SUBÍA el volumen incluso con MIX=0.
+    //
+    // Mantén el audio 100% igual mientras esté dentro de [-1, +1]
+    // (lo normal en señal float). Solo limita si se pasa.
+    return juce::jlimit (-1.0f, 1.0f, x);
 }
 
 // Drive 0..1 -> dB de pregain
@@ -495,7 +501,6 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
-
 
 
 
