@@ -516,7 +516,7 @@ YourPluginAudioProcessor::YourPluginAudioProcessor()
     static std::once_flag sFontOnce;
     std::call_once (sFontOnce, []()
     {
-        if (auto tf = plugin::ui::loadPrimaryTypefaceFromBinaryData())
+        if (auto tf = plugin::ui::getEmbeddedPluginTypeface())
             juce::Desktop::getInstance().getDefaultLookAndFeel().setDefaultSansSerifTypeface (tf);
     });
 #endif
@@ -977,4 +977,5 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
 
