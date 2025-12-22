@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <new>
+#include <memory>
 #include <type_traits>
 
 // Presets disponibles
@@ -34,7 +35,46 @@ struct PresetRegistry
         float (*process)(void* state, float x) = nullptr;
     };
 
-    template <typename Preset>
+    
+
+// Compile-time helpers: evita hardcodear kMaxStateSize/kMaxStateAlign al agregar presets.
+template <typename... Presets>
+struct MaxStateSize;
+
+template <typename P0, typename... Ps>
+struct MaxStateSize<P0, Ps...>
+{
+    static constexpr std::size_t value =
+        (sizeof (typename P0::State) > MaxStateSize<Ps...>::value)
+            ? sizeof (typename P0::State)
+            : MaxStateSize<Ps...>::value;
+};
+
+template <typename P0>
+struct MaxStateSize<P0>
+{
+    static constexpr std::size_t value = sizeof (typename P0::State);
+};
+
+template <typename... Presets>
+struct MaxStateAlign;
+
+template <typename P0, typename... Ps>
+struct MaxStateAlign<P0, Ps...>
+{
+    static constexpr std::size_t value =
+        (alignof (typename P0::State) > MaxStateAlign<Ps...>::value)
+            ? alignof (typename P0::State)
+            : MaxStateAlign<Ps...>::value;
+};
+
+template <typename P0>
+struct MaxStateAlign<P0>
+{
+    static constexpr std::size_t value = alignof (typename P0::State);
+};
+
+template <typename Preset>
     static Item make() noexcept
     {
         // Nota: muchos States usan in-class initializers (no son *trivially* constructible).
@@ -54,7 +94,7 @@ struct PresetRegistry
             },
             +[](void* st)
             {
-                reinterpret_cast<typename Preset::State*> (st)->~State();
+                std::destroy_at (reinterpret_cast<typename Preset::State*> (st));
             },
             +[](void* st, float sr)
             {
@@ -76,11 +116,12 @@ struct PresetRegistry
 
     // Máximos para reservar storage (stereo): si agregas presets con State
     // más grande/alineación mayor, actualiza estos constexpr.
-    static constexpr std::size_t kMaxStateSize  = sizeof (Preset_Neve1073::State);
-    static constexpr std::size_t kMaxStateAlign = alignof (Preset_Neve1073::State);
+    static constexpr std::size_t kMaxStateSize  = MaxStateSize<Preset_Neve1073>::value;
+    static constexpr std::size_t kMaxStateAlign = MaxStateAlign<Preset_Neve1073>::value;
 
     // Lista de presets disponibles
     static inline const std::array<Item, 1> items {{
         make<Preset_Neve1073>(),
     }};
 };
+
