@@ -95,22 +95,39 @@ file(GLOB_RECURSE PLUGIN_ASSET_PNGS
   "${PLUGIN_ASSETS_DIR}/*.PNG"
 )
 
+# 3b) Fonts (TTF/OTF) en assets (para UI)
+file(GLOB_RECURSE PLUGIN_ASSET_FONTS
+  CONFIGURE_DEPENDS
+  "${PLUGIN_ASSETS_DIR}/*.ttf"
+  "${PLUGIN_ASSETS_DIR}/*.TTF"
+  "${PLUGIN_ASSETS_DIR}/*.otf"
+  "${PLUGIN_ASSETS_DIR}/*.OTF"
+)
+
 list(LENGTH PLUGIN_ASSET_PNGS PLUGIN_ASSET_PNGS_COUNT)
+list(LENGTH PLUGIN_ASSET_FONTS PLUGIN_ASSET_FONTS_COUNT)
+
+# 3c) Total assets (PNGs + fonts)
+set(PLUGIN_ASSET_FILES ${PLUGIN_ASSET_PNGS} ${PLUGIN_ASSET_FONTS})
+list(LENGTH PLUGIN_ASSET_FILES PLUGIN_ASSET_FILES_COUNT)
 
 message(STATUS "PLUGIN_ASSET_PNGS        = ${PLUGIN_ASSET_PNGS}")
 message(STATUS "PLUGIN_ASSET_PNGS_COUNT  = ${PLUGIN_ASSET_PNGS_COUNT}")
+message(STATUS "PLUGIN_ASSET_FONTS       = ${PLUGIN_ASSET_FONTS}")
+message(STATUS "PLUGIN_ASSET_FONTS_COUNT = ${PLUGIN_ASSET_FONTS_COUNT}")
+message(STATUS "PLUGIN_ASSET_FILES_COUNT = ${PLUGIN_ASSET_FILES_COUNT}")
 
-if(PLUGIN_ASSET_PNGS_COUNT EQUAL 0)
+if(PLUGIN_ASSET_FILES_COUNT EQUAL 0)
   message(WARNING
-    "No se encontraron PNGs en '${PLUGIN_ASSETS_DIR}'. "
+    "No se encontraron assets (PNGs/Fuentes) en '${PLUGIN_ASSETS_DIR}'. "
     "Si en tu repo existen, entonces NO llegaron al checkout del runner (revisar Git LFS/submodules)."
   )
 endif()
 
-# 4) Si hay PNGs -> embebe en BinaryData + define macro
-if (PLUGIN_ASSET_PNGS_COUNT GREATER 0)
+# 4) Si hay assets -> embebe en BinaryData + define macro
+if (PLUGIN_ASSET_FILES_COUNT GREATER 0)
   juce_add_binary_data(PluginSaturador1_BinaryData
-    SOURCES ${PLUGIN_ASSET_PNGS}
+    SOURCES ${PLUGIN_ASSET_FILES}
   )
 
   target_link_libraries(PluginSaturador1 PRIVATE
@@ -120,6 +137,30 @@ if (PLUGIN_ASSET_PNGS_COUNT GREATER 0)
   target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=1)
 else()
   target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_ASSETS=0)
+endif()
+
+# 4b) Si hay fuente(s) -> elige la primera (ordenada) y expón nombre de recurso
+# Nota: juce_add_binary_data genera nombres tipo "MyFont_ttf" (no "MyFont.ttf").
+if (PLUGIN_ASSET_FONTS_COUNT GREATER 0)
+  list(SORT PLUGIN_ASSET_FONTS)
+  list(GET PLUGIN_ASSET_FONTS 0 PLUGIN_FONT_PATH)
+  get_filename_component(PLUGIN_FONT_FILENAME "${PLUGIN_FONT_PATH}" NAME)
+
+  # resource name: reemplaza caracteres no válidos por '_' (incluye '.' -> '_')
+  set(PLUGIN_FONT_RESOURCE "${PLUGIN_FONT_FILENAME}")
+  string(REGEX REPLACE "[^A-Za-z0-9_]" "_" PLUGIN_FONT_RESOURCE "${PLUGIN_FONT_RESOURCE}")
+  # juce_add_binary_data tiende a normalizar a minúsculas en los nombres de recurso
+  string(TOLOWER "${PLUGIN_FONT_RESOURCE}" PLUGIN_FONT_RESOURCE)
+
+  message(STATUS "PLUGIN_FONT_FILENAME     = ${PLUGIN_FONT_FILENAME}")
+  message(STATUS "PLUGIN_FONT_RESOURCE     = ${PLUGIN_FONT_RESOURCE}")
+
+  target_compile_definitions(PluginSaturador1 PRIVATE
+    PLUGIN_HAS_CUSTOM_FONT=1
+    PLUGIN_CUSTOM_FONT_RESOURCE=\"${PLUGIN_FONT_RESOURCE}\"
+  )
+else()
+  target_compile_definitions(PluginSaturador1 PRIVATE PLUGIN_HAS_CUSTOM_FONT=0)
 endif()
 
 #+#+#+#+---------------------------------------------------------------------------
@@ -172,4 +213,5 @@ target_link_libraries(PluginSaturador1 PRIVATE
   juce::juce_recommended_warning_flags
   juce::juce_recommended_lto_flags
 )
+
 
