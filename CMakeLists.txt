@@ -197,7 +197,8 @@ target_include_directories(PluginSaturador1 PRIVATE
 )
 
 target_sources(PluginSaturador1 PRIVATE
-  PluginProcessor.cpp
+  PluginProcessor-1.cpp
+  PluginProcessor-2.cpp
   PluginProcessor.h
   funciones.h
 )
@@ -220,6 +221,7 @@ target_link_libraries(PluginSaturador1 PRIVATE
   juce::juce_recommended_warning_flags
   juce::juce_recommended_lto_flags
 )
+
 
 
 
