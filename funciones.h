@@ -38,14 +38,36 @@ namespace plugin
 // Soft clip final "safety"
 inline float softClipSafety (float x) noexcept
 {
-    // IMPORTANTE:
-    // Esta función es un "safety" final, NO un saturador con make-up.
-    // La versión anterior normalizaba por tanh(k) y dejaba una pendiente > 1
-    // cerca de 0, lo que SUBÍA el volumen incluso con MIX=0.
+    // Safety final (NO saturador con make-up).
+    // Objetivo:
+    // - Mantener 1:1 (sin cambios) lejos del techo.
+    // - Evitar hard-clip (jlimit) porque genera armónicos muy altos -> aliasing.
+    // - Knee corto: empieza a comprimir un poco antes de ±1 y asintota a ±1.
     //
-    // Mantén el audio 100% igual mientras esté dentro de [-1, +1]
-    // (lo normal en señal float). Solo limita si se pasa.
-    return juce::jlimit (-1.0f, 1.0f, x);
+    // Mapeo:
+    // - |x| <= kneeStart  -> y = x (perfectamente lineal)
+    // - |x|  > kneeStart  -> y = kneeStart + (1-kneeStart) * (2/pi)*atan( (pi/2) * (|x|-kneeStart)/(1-kneeStart) )
+    //
+    // Nota: La escala (pi/2) asegura pendiente ~= 1 justo al inicio del knee,
+    // evitando un "salto" brusco de derivada.
+
+    constexpr float kneeStart = 0.98f;              // empieza a comprimir aquí
+    constexpr float one       = 1.0f;
+
+    const float ax = std::abs (x);
+    if (ax <= kneeStart)
+        return x;
+
+    const float sign = (x >= 0.0f ? 1.0f : -1.0f);
+
+    const float kneeRange = juce::jmax (1.0e-6f, one - kneeStart);
+    const float t = ax - kneeStart; // excedente por encima del knee
+
+    const float scaled = juce::MathConstants<float>::halfPi * (t / kneeRange); // (pi/2)*t/(1-kneeStart)
+    const float soft   = (2.0f / juce::MathConstants<float>::pi) * std::atan (scaled); // 0..1
+
+    const float y = kneeStart + kneeRange * soft; // -> 1 asintótico
+    return sign * juce::jlimit (0.0f, 1.0f, y);
 }
 
 // Drive 0..1 -> dB de pregain
