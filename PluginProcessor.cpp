@@ -166,6 +166,18 @@ public:
     {
         // Carga Typeface embebida (si existe).
         typeface = plugin::ui::getEmbeddedPluginTypeface();
+
+        // ComboBox (recuadro)
+        setColour (juce::ComboBox::backgroundColourId, juce::Colours::black);
+        setColour (juce::ComboBox::textColourId,       juce::Colours::white);
+        setColour (juce::ComboBox::arrowColourId,      juce::Colours::white);
+        setColour (juce::ComboBox::outlineColourId,    juce::Colours::black);
+
+        // PopupMenu (menú desplegable)
+        setColour (juce::PopupMenu::backgroundColourId, juce::Colours::black);
+        setColour (juce::PopupMenu::textColourId,       juce::Colours::white);
+        setColour (juce::PopupMenu::highlightedBackgroundColourId, juce::Colour::fromRGB (20, 20, 20));
+        setColour (juce::PopupMenu::highlightedTextColourId,       juce::Colours::white);
     }
 
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font& f) override
@@ -175,6 +187,49 @@ public:
         return juce::LookAndFeel_V4::getTypefaceForFont (f);
     }
 
+    juce::Font getComboBoxFont (juce::ComboBox& box) override
+    {
+        auto f = juce::LookAndFeel_V4::getComboBoxFont (box);
+        f.setHeight (juce::jmax (6.0f, f.getHeight() * 0.5f));
+        return f;
+    }
+
+    juce::Font getPopupMenuFont() override
+    {
+        auto f = juce::LookAndFeel_V4::getPopupMenuFont();
+        f.setHeight (juce::jmax (6.0f, f.getHeight() * 0.5f));
+        return f;
+    }
+
+    void drawComboBox (juce::Graphics& g, int width, int height,
+                       bool /*isButtonDown*/,
+                       int /*buttonX*/, int /*buttonY*/, int /*buttonW*/, int /*buttonH*/,
+                       juce::ComboBox& box) override
+    {
+        auto r = juce::Rectangle<float> (0.0f, 0.0f, (float) width, (float) height);
+        const float corner = 4.0f;
+
+        g.setColour (box.findColour (juce::ComboBox::backgroundColourId));
+        g.fillRoundedRectangle (r, corner);
+
+        g.setColour (box.findColour (juce::ComboBox::outlineColourId));
+        g.drawRoundedRectangle (r.reduced (0.5f), corner, 1.0f);
+
+        // flecha
+        g.setColour (box.findColour (juce::ComboBox::arrowColourId));
+        auto arrowArea = r.removeFromRight (22.0f).reduced (6.0f, 6.0f);
+
+        juce::Path p;
+        p.addTriangle (arrowArea.getCentreX() - 4.0f, arrowArea.getCentreY() - 2.0f,
+                       arrowArea.getCentreX() + 4.0f, arrowArea.getCentreY() - 2.0f,
+                       arrowArea.getCentreX(),        arrowArea.getCentreY() + 4.0f);
+        g.fillPath (p);
+    }
+
+    void drawPopupMenuBackground (juce::Graphics& g, int /*width*/, int /*height*/) override
+    {
+        g.fillAll (findColour (juce::PopupMenu::backgroundColourId));
+    }
 
     void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPosProportional,
@@ -227,7 +282,6 @@ public:
 
 private:
     juce::Typeface::Ptr typeface;
-
 };
 
 //------------------------------------------------------------------------------
@@ -303,7 +357,8 @@ public:
 
         g.drawImage (sheet,
                      dxI, dyI, dwI, dhI,
-                     sx, sy, frameW, frameH);}
+                     sx, sy, frameW, frameH);
+    }
 
 private:
     void timerCallback() override
@@ -415,18 +470,6 @@ public:
         osBox.addItem ("x8", 4);
         addAndMakeVisible (osBox);
 
-
-       #if PLUGIN_HAS_ASSETS
-        modelImg = juce::ImageCache::getFromMemory (BinaryData::model_png, BinaryData::model_pngSize);
-        modelImage.setImage (modelImg);
-
-        // ✅ mantener AR + centrar + solo reducir (no agrandar / no deformar)
-        modelImage.setImagePlacement (juce::RectanglePlacement::centred
-                                    | juce::RectanglePlacement::onlyReduceInSize);
-
-        addAndMakeVisible (modelImage);
-       #endif
-
         using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
         using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
@@ -487,17 +530,9 @@ public:
         toneKnob .setBounds (startX + knobW + gap,           y, knobW, knobH);
         mixKnob  .setBounds (startX + (knobW + gap) * 2,     y, knobW, knobH);
 
-        // --- Bottom row: [model.png] [ComboBox] ---
+        // --- Bottom row: [Oversampling] [Preamp] ---
         bottom.reduce (0, 10);
 
-        // ✅ 1.3: model.png mucho más chico
-        auto left = bottom.removeFromLeft (44);
-       #if PLUGIN_HAS_ASSETS
-        if (modelImg.isValid())
-            modelImage.setBounds (left.reduced (2, 18));
-       #endif
-
-        // Dos combos: [Oversampling] [Preamp]
         auto osArea = bottom.removeFromLeft (juce::jmax (120, bottom.getWidth() / 3));
         osBox.setBounds (osArea.reduced (0, 12));
         preampBox.setBounds (bottom.reduced (0, 12));
@@ -516,11 +551,6 @@ private:
 
     juce::ComboBox preampBox;
     juce::ComboBox osBox;
-
-   #if PLUGIN_HAS_ASSETS
-    juce::ImageComponent modelImage;
-    juce::Image modelImg;
-   #endif
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> driveAtt, toneAtt, mixAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> preampAtt, osAtt;
@@ -553,7 +583,6 @@ YourPluginAudioProcessor::YourPluginAudioProcessor()
             juce::Desktop::getInstance().getDefaultLookAndFeel().setDefaultSansSerifTypeface (tf);
     });
 #endif
-
 }
 
 //==============================================================================
@@ -738,12 +767,9 @@ void YourPluginAudioProcessor::applyOversamplingIndex (int newIndex, bool force)
     const float osFactor = (idx == 0 ? 1.0f : (float) (1u << idx));
     osSr = (float) (sr * (double) osFactor);
 
-    // Mantener módulos internos alineados con el SR "real" del procesamiento WET
-    stereoInteract.prepare (osSr);
-
     if (activePreset != nullptr)
     {
-        for (int ch = 0; ch < 2; ++ch)
+        for (int ch = 0; ch < wetCh; ++ch)
         {
             if (! presetStateConstructed[(size_t) ch])
                 continue;
@@ -754,7 +780,6 @@ void YourPluginAudioProcessor::applyOversamplingIndex (int newIndex, bool force)
         }
     }
 }
-
 
 void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
@@ -782,12 +807,16 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     // Guardar block size inicial (si el host luego usa uno mayor, creceremos buffers/OS)
     maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
+
+    // Canales reales (mono/stereo) para respetar distribución original del input
+    const int wetCh = juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
+
     // Oversampling (seleccionable en runtime)
     // Nota: pre-creamos oversamplers x2/x4/x8 para evitar reallocs al cambiar el modo.
-    ensureOversamplers (juce::jmax (1, juce::jmin (2, getTotalNumInputChannels())));
+    ensureOversamplers (wetCh);
     initOversamplers (maxBlockSizePrepared);
+
     // buffers
-    const int wetCh = juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
     wetBuffer.setSize (wetCh, maxBlockSizePrepared, false, false, true);
 
     // ---------------------------------------------------------------------
@@ -797,7 +826,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     // activo, destruimos los estados construidos para evitar UB.
     if (activePreset != nullptr && activePreset->destruct != nullptr)
     {
-        for (int ch = 0; ch < 2; ++ch)
+        for (int ch = 0; ch < wetCh; ++ch)
         {
             if (presetStateConstructed[(size_t) ch])
                 activePreset->destruct ((void*) &presetState[(size_t) ch]);
@@ -815,6 +844,11 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     activePreset = nullptr;
     applyOversamplingIndex (getDesiredOversamplingIndex(), true);
 
+    // delay para DRY alineado con latencia de oversampling
+    dryDelayBufferSize = juce::jmax (1, maxBlockSizePrepared + dryDelaySamples + 1);
+    dryDelayBuffer.setSize (wetCh, dryDelayBufferSize, false, false, true);
+    dryDelayBuffer.clear();
+    dryDelayWritePos = 0;
 
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
@@ -826,7 +860,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
         activePresetIndex = preampIndex;
         activePreset = &PresetRegistry::items[(size_t) preampIndex];
 
-        for (int ch = 0; ch < 2; ++ch)
+        for (int ch = 0; ch < wetCh; ++ch)
         {
             void* st = (void*) &presetState[(size_t) ch];
             if (activePreset->construct != nullptr)
@@ -899,7 +933,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         // Destruir estado anterior antes de cambiar de preset
         if (activePreset != nullptr && activePreset->destruct != nullptr)
         {
-            for (int ch = 0; ch < 2; ++ch)
+            for (int ch = 0; ch < wetCh; ++ch)
             {
                 if (presetStateConstructed[(size_t) ch])
                     activePreset->destruct ((void*) &presetState[(size_t) ch]);
@@ -913,10 +947,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
         const float osFactor = (currentOSIndex == 0 ? 1.0f : (float) (1u << currentOSIndex));
         osSr = (float) (sr * (double) osFactor);
-        // ✅ Mantén stereoInteract alineado si cambia SR/OS (o si rearmas oversampling)
-        stereoInteract.prepare (osSr);
 
-        for (int ch = 0; ch < 2; ++ch)
+        for (int ch = 0; ch < wetCh; ++ch)
         {
             void* st = (void*) &presetState[(size_t) ch];
             if (activePreset->construct != nullptr)
@@ -964,6 +996,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     // -------------------------------------------------------------------------
     // 2) Oversampling (opcional) -> preset PRO (stateful) -> (downsample)
+    //    ESTÉREO "DUAL-MONO": cada lado independiente (sin cross-talk L<->R)
     if (activePreset != nullptr && activePreset->process != nullptr)
     {
         if (oversampling != nullptr)
@@ -978,7 +1011,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             const size_t osSamples = osBlock.getNumSamples();
             const size_t osCh = osBlock.getNumChannels();
 
-            // ✅ B) Loop por muestra con interacción estéreo PRO (si osCh == 2)
             if (osCh == 2)
             {
                 float* L = osBlock.getChannelPointer (0);
@@ -989,10 +1021,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
                 for (size_t n = 0; n < osSamples; ++n)
                 {
-                    float xL = L[n];
-                    float xR = R[n];
-
-                    stereoInteract.processSample (xL, xR);
+                    const float xL = L[n];
+                    const float xR = R[n];
 
                     L[n] = activePreset->process (stL, xL);
                     R[n] = activePreset->process (stR, xR);
@@ -1015,7 +1045,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         }
         else
         {
-            // x1: sin oversampling (ahorra CPU)
+            // x1: sin oversampling (ahorra CPU) - DUAL MONO
             if (wetCh >= 2 && wetR != nullptr)
             {
                 void* stL = (void*) &presetState[0];
@@ -1023,13 +1053,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    float xL = wetL[i];
-                    float xR = wetR[i];
-
-                    stereoInteract.processSample (xL, xR);
-
-                    wetL[i] = activePreset->process (stL, xL);
-                    wetR[i] = activePreset->process (stR, xR);
+                    wetL[i] = activePreset->process (stL, wetL[i]);
+                    wetR[i] = activePreset->process (stR, wetR[i]);
                 }
             }
             else
@@ -1043,16 +1068,16 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     // -------------------------------------------------------------------------
     // 3) Mix + AUTO-LEVEL (volumen constante) - ULTRA (por muestra)
-//
-// Objetivo: que el volumen se mantenga constante aunque muevas cualquier knob.
-// Este modo es muy estable en hosts con buffer variable (FL Studio, etc.).
-//
-// Medimos potencia (HP) de:
-//   - ENTRADA: dry ALINEADO con la latencia del oversampling (dryDelay)
-//   - SALIDA:  mixed PRE autogain
-// y aplicamos la ganancia compensatoria por muestra (con attack/release internos).
-//
-// ⚠️ Importante: la medición de salida es PRE gain para evitar auto-cancelación.
+    //
+    // Objetivo: que el volumen se mantenga constante aunque muevas cualquier knob.
+    // Este modo es muy estable en hosts con buffer variable (FL Studio, etc.).
+    //
+    // Medimos potencia (HP) de:
+    //   - ENTRADA: dry ALINEADO con la latencia del oversampling (dryDelay)
+    //   - SALIDA:  mixed PRE autogain
+    // y aplicamos la ganancia compensatoria por muestra (con attack/release internos).
+    //
+    // ⚠️ Importante: la medición de salida es PRE gain para evitar auto-cancelación.
 
     // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
     auto* dL = dryDelayBuffer.getWritePointer (0);
@@ -1114,9 +1139,11 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             ch1[i] = plugin::softClipSafety (mixedR * g);
     }
 }
+
 //==============================================================================
 // This creates new instances of the plugin.
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
