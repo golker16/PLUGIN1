@@ -45,7 +45,6 @@ public:
 private:
     void updateTiltCoeffs (float tone01);
 
-
     // Oversampling selector (0=x1, 1=x2, 2=x4, 3=x8)
     int  getDesiredOversamplingIndex() const noexcept;
     void ensureOversamplers (int numChannels);
@@ -241,6 +240,7 @@ private:
     // Tilt EQ (pre)
     juce::dsp::IIR::Filter<float> lowShelfL, lowShelfR;
     juce::dsp::IIR::Filter<float> highShelfL, highShelfR;
+
     // Oversampling (seleccionable en runtime)
     static constexpr int kMaxOversamplingIndex = 3; // x8
     std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, 4> oversamplers; // [0]=nullptr, [1]=x2, [2]=x4, [3]=x8
@@ -265,14 +265,78 @@ private:
 
     using PresetStateStorage =
         std::aligned_storage_t<PresetRegistry::kMaxStateSize, PresetRegistry::kMaxStateAlign>;
-    std::array<PresetStateStorage, 2> presetState {}; // hasta estéreo
-    std::array<bool, 2> presetStateConstructed {{ false, false }};
 
+    //==============================================================================
+    // ✅ (B) Dos banks de estado + punteros active/pending (evita memcpy UB)
+    //     Bank A = actual, Bank B = pending durante transición
+    std::array<PresetStateStorage, 2> presetStateA {}; // hasta estéreo
+    std::array<PresetStateStorage, 2> presetStateB {}; // hasta estéreo
+
+    std::array<bool, 2> presetStateConstructedA {{ false, false }};
+    std::array<bool, 2> presetStateConstructedB {{ false, false }};
+
+    std::array<PresetStateStorage, 2>* activeState  = &presetStateA;
+    std::array<PresetStateStorage, 2>* pendingState = &presetStateB;
+
+    std::array<bool, 2>* activeConstructed  = &presetStateConstructedA;
+    std::array<bool, 2>* pendingConstructed = &presetStateConstructedB;
+
+    // Helpers de acceso (cómodos)
+    inline PresetStateStorage& getActiveStateStorage (int ch) noexcept  { return (*activeState)[(size_t) ch]; }
+    inline PresetStateStorage& getPendingStateStorage(int ch) noexcept  { return (*pendingState)[(size_t) ch]; }
+    inline bool& getActiveConstructed (int ch) noexcept                 { return (*activeConstructed)[(size_t) ch]; }
+    inline bool& getPendingConstructed(int ch) noexcept                 { return (*pendingConstructed)[(size_t) ch]; }
+
+    //==============================================================================
     plugin::AutoGainExact autoGain;
-
 
     double sr = 48000.0;
     float  osSr = 384000.0f; // sr * oversamplingFactor (se recalcula en prepareToPlay)
+
+    //==============================================================================
+    // ✅ (A) Crossfade de preset/OS (estructura de transición)
+    bool transitioning = false;
+    int  xfadeTotalSamples = 0;   // ej. 10ms en SR base (se calcula en beginTransition)
+    int  xfadePosSamples   = 0;   // contador
+
+    int pendingPresetIndex = -1;
+    int pendingOSIndex     = -1;
+
+    //==============================================================================
+    // ✅ (C) StereoInteract siempre ON (dos instancias)
+    StereoInteract stereoA; // activo
+    StereoInteract stereoB; // pending durante transición
+
+    //==============================================================================
+    // ✅ (D) Buffers extra mínimos para crossfade
+    juce::AudioBuffer<float> wetOld; // salida wet de cadena A
+    juce::AudioBuffer<float> wetNew; // salida wet de cadena B
+    juce::AudioBuffer<float> osTemp; // solo para "mismo OS + cambio preset" en dominio oversampled
+
+    //==============================================================================
+    // ✅ (E) Helpers privados (se implementan en .cpp)
+    void beginTransition (int newPreset, int newOS, int wetCh, int numSamples);
+    void commitTransition (int wetCh);
+
+    // Render de cadenas A/B:
+    // - Implementación típica:
+    //   * si OS cambia -> render A y B a SR base en wetOld/wetNew
+    //   * si OS igual  -> render A y B en oversampled (usando osTemp) y bajar una sola vez
+    void renderChainA (juce::AudioBuffer<float>& io, int wetCh, int numSamples);
+    void renderChainB (juce::AudioBuffer<float>& io, int wetCh, int numSamples);
+
+    // Gains de crossfade (equal-power)
+    inline float xfadeGainA (float t) const noexcept
+    {
+        t = juce::jlimit (0.0f, 1.0f, t);
+        return std::cos (0.5f * juce::MathConstants<float>::pi * t);
+    }
+
+    inline float xfadeGainB (float t) const noexcept
+    {
+        t = juce::jlimit (0.0f, 1.0f, t);
+        return std::sin (0.5f * juce::MathConstants<float>::pi * t);
+    }
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (YourPluginAudioProcessor)
 };
