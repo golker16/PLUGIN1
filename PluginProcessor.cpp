@@ -170,33 +170,55 @@ static bool loadImageFromBinaryDataByFilename (const juce::String& wantedFile, j
     return false;
 }
 
-// Intenta inferir el grid correcto (cols/rows) usando tamaño del PNG y totalFrames.
-// Evita “se ve recortado raro” cuando el sheet no es 9x5.
+// ✅ 1) CAMBIO: inferSpriteGrid reemplazado por versión robusta con aspectPenalty
 static std::pair<int, int> inferSpriteGrid (const juce::Image& sheet, int totalFrames)
 {
     const int W = sheet.getWidth();
     const int H = sheet.getHeight();
 
+    auto scoreGrid = [&] (int cols, int rows) -> long long
+    {
+        cols = juce::jmax (1, cols);
+        rows = juce::jmax (1, rows);
+
+        const int fwInt = W / cols;
+        const int fhInt = H / rows;
+
+        if (fwInt <= 0 || fhInt <= 0)
+            return std::numeric_limits<long long>::max();
+
+        const int rem = (W % cols) + (H % rows); // 0 = divisiones perfectas
+
+        const float fw = (float) W / (float) cols;
+        const float fh = (float) H / (float) rows;
+        const float ar = (fh > 0.0001f ? fw / fh : 1.0f);
+
+        // Area grande preferida
+        const long long area = (long long) (fw * fh);
+
+        // Penaliza aspectos “absurdos” (que típicamente producen una rayita)
+        // Ajustá rangos si tu header es ultra ancho; esto evita ar ~ 0.01 o ar ~ 200.
+        long long aspectPenalty = 0;
+        if (ar < 0.25f)  aspectPenalty += (long long) ((0.25f - ar) * 1.0e12f);
+        if (ar > 40.0f)  aspectPenalty += (long long) ((ar - 40.0f) * 1.0e10f);
+
+        // Score: primero que divida bien (rem bajo), después área grande, y evita AR extremos.
+        // rem pesa muchísimo para priorizar grids “limpios”.
+        return (long long) rem * 1000000LL - area + aspectPenalty;
+    };
+
     long long bestScore = std::numeric_limits<long long>::max();
-    int bestCols = juce::jmax (1, totalFrames);
-    int bestRows = 1;
+    int bestCols = 1;
+    int bestRows = juce::jmax (1, totalFrames);
 
     for (int cols = 1; cols <= totalFrames; ++cols)
     {
         const int rows = (totalFrames + cols - 1) / cols; // ceil
-        const int fw = W / cols;
-        const int fh = H / rows;
+        const long long s = scoreGrid (cols, rows);
 
-        if (fw <= 0 || fh <= 0)
-            continue;
-
-        const int rem = (W % cols) + (H % rows);          // 0 = perfecto
-        const long long area = 1LL * fw * fh;             // preferimos celdas grandes
-        const long long score = 1LL * rem * 1000000LL - area;
-
-        if (score < bestScore)
+        if (s < bestScore)
         {
-            bestScore = score;
+            bestScore = s;
             bestCols = cols;
             bestRows = rows;
         }
@@ -563,43 +585,83 @@ public:
 
         addAndMakeVisible (header);
 
-#if PLUGIN_HAS_ASSETS
+       #if PLUGIN_HAS_ASSETS
         // header_sheet.png -> sprite sheet animado (45 frames)
         {
             juce::Image sheet;
 
+            // ✅ 2) CAMBIO: elegir el mejor de 3 grids para evitar “rayita”
             if (plugin::ui::loadImageFromBinaryDataByFilename ("header_sheet.png", sheet))
             {
-                int cols = 0;
-                int rows = 0;
+                const int totalFrames = 45;
 
-                // ✅ Si tu animación es una tira (1 columna / 1 fila), forzalo para evitar inferencias raras.
-                if (sheet.getHeight() > sheet.getWidth() * 2)
+                auto scoreCandidate = [&] (int cols, int rows) -> long long
                 {
-                    cols = 1;
-                    rows = 45;
-                }
-                else if (sheet.getWidth() > sheet.getHeight() * 2)
-                {
-                    cols = 45;
-                    rows = 1;
-                }
-                else
-                {
-                    const auto grid = plugin::ui::inferSpriteGrid (sheet, 45);
-                    cols = grid.first;
-                    rows = grid.second;
-                }
+                    cols = juce::jmax (1, cols);
+                    rows = juce::jmax (1, rows);
+
+                    const int W = sheet.getWidth();
+                    const int H = sheet.getHeight();
+
+                    const int fwInt = W / cols;
+                    const int fhInt = H / rows;
+                    if (fwInt <= 0 || fhInt <= 0)
+                        return std::numeric_limits<long long>::max();
+
+                    const int rem = (W % cols) + (H % rows);
+
+                    const float fw = (float) W / (float) cols;
+                    const float fh = (float) H / (float) rows;
+                    const float ar = (fh > 0.0001f ? fw / fh : 1.0f);
+
+                    const long long area = (long long) (fw * fh);
+
+                    long long aspectPenalty = 0;
+                    if (ar < 0.25f) aspectPenalty += (long long) ((0.25f - ar) * 1.0e12f);
+                    if (ar > 40.0f) aspectPenalty += (long long) ((ar - 40.0f) * 1.0e10f);
+
+                    return (long long) rem * 1000000LL - area + aspectPenalty;
+                };
+
+                // Candidato A: tira vertical 1xN
+                const int cA = 1;
+                const int rA = totalFrames;
+
+                // Candidato B: tira horizontal Nx1
+                const int cB = totalFrames;
+                const int rB = 1;
+
+                // Candidato C: inferencia (mejorada)
+                const auto inferred = plugin::ui::inferSpriteGrid (sheet, totalFrames);
+                const int cC = inferred.first;
+                const int rC = inferred.second;
+
+                // Elegimos el mejor score
+                int cols = cC, rows = rC;
+                long long best = scoreCandidate (cC, rC);
+
+                const long long sA = scoreCandidate (cA, rA);
+                if (sA < best) { best = sA; cols = cA; rows = rA; }
+
+                const long long sB = scoreCandidate (cB, rB);
+                if (sB < best) { best = sB; cols = cB; rows = rB; }
 
                #if JUCE_DEBUG
+                // Debug útil para confirmar que no estás agarrando frames ultra-angostos
+                const float fw = (float) sheet.getWidth()  / (float) cols;
+                const float fh = (float) sheet.getHeight() / (float) rows;
+                const float ar = (fh > 0.0001f ? fw / fh : 1.0f);
+
                 JUCE_DBG ("[HEADER] sheet=" + juce::String (sheet.getWidth()) + "x" + juce::String (sheet.getHeight())
-                          + " grid=" + juce::String (cols) + "x" + juce::String (rows));
+                          + " chosenGrid=" + juce::String (cols) + "x" + juce::String (rows)
+                          + " frame=" + juce::String (fw, 2) + "x" + juce::String (fh, 2)
+                          + " ar=" + juce::String (ar, 3));
                #endif
 
-                header.setSpriteSheet (sheet, /*totalFrames*/ 45, /*fps*/ 3, /*columns*/ cols, /*rows*/ rows);
+                header.setSpriteSheet (sheet, /*totalFrames*/ totalFrames, /*fps*/ 3, /*columns*/ cols, /*rows*/ rows);
             }
         }
-#endif
+       #endif
 
 
         // ✅ PNG encima de knobs (desde /assets -> BinaryData) SOLO si existe
@@ -1248,16 +1310,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     // -------------------------------------------------------------------------
     // 3) Mix + AUTO-LEVEL (volumen constante) - ULTRA (por muestra)
-    //
-    // Objetivo: que el volumen se mantenga constante aunque muevas cualquier knob.
-    // Este modo es muy estable en hosts con buffer variable (FL Studio, etc.).
-    //
-    // Medimos potencia (HP) de:
-    //   - ENTRADA: dry ALINEADO con la latencia del oversampling (dryDelay)
-    //   - SALIDA:  mixed PRE autogain
-    // y aplicamos la ganancia compensatoria por muestra (con attack/release internos).
-    //
-    // ⚠️ Importante: la medición de salida es PRE gain para evitar auto-cancelación.
 
     // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
     auto* dL = dryDelayBuffer.getWritePointer (0);
@@ -1293,12 +1345,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float wetOutL = wetL[i];
         const float wetOutR = (wetR != nullptr) ? wetR[i] : wetOutL;
 
-        // -----------------------------------------------------------------
         // BYPASS EXACTO CUANDO MIX=0
-        //
-        // Si el usuario pone MIX=0, quiere el audio idéntico al original (sin
-        // autogain, sin safety clip, sin nada que cambie el nivel/tono).
-        // Igual actualizamos el autogain con dry->dry para que se mantenga en unity.
         if (mix01 <= 1.0e-4f)
         {
             (void) autoGain.processStereo (dryL, dryR, dryL, dryR);
