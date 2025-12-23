@@ -489,10 +489,21 @@ public:
         const float sw    = juce::jmax (1.0f, frameWf - 2.0f * bleed);
         const float sh    = juce::jmax (1.0f, frameHf - 2.0f * bleed);
 
-        // ✅ FIX C4244: usar overload con Rectangle<float>
-        const juce::Rectangle<float> dest (dx, dy, dw, dh);
-        const juce::Rectangle<float> src  (sx + bleed, sy + bleed, sw, sh);
-        g.drawImage (sheet, dest, src);
+        // ✅ FIX C2665: usar overload clásico (src/dst en int), portable en todas las JUCE
+        const int dxI = juce::roundToInt (dx);
+        const int dyI = juce::roundToInt (dy);
+        const int dwI = juce::jmax (1, juce::roundToInt (dw));
+        const int dhI = juce::jmax (1, juce::roundToInt (dh));
+
+        const int sxI = juce::roundToInt (sx + bleed);
+        const int syI = juce::roundToInt (sy + bleed);
+        const int swI = juce::jmax (1, juce::roundToInt (sw));
+        const int shI = juce::jmax (1, juce::roundToInt (sh));
+
+        g.drawImage (sheet,
+                     dxI, dyI, dwI, dhI,
+                     sxI, syI, swI, shI,
+                     false);
     }
 
 private:
@@ -552,11 +563,11 @@ public:
         outputKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF3A3A3A"));
         outputKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFD0D0D0"));
 
-        // Fonts/labels
-        driveKnob.label.setFont (juce::Font (11.0f));
-        toneKnob .label.setFont (juce::Font (11.0f));
-        mixKnob  .label.setFont (juce::Font (11.0f));
-        outputKnob.label.setFont (juce::Font (11.0f));
+        // Fonts/labels (✅ FIX C4996: usar FontOptions)
+        driveKnob.label.setFont (juce::Font (juce::FontOptions (11.0f)));
+        toneKnob .label.setFont (juce::Font (juce::FontOptions (11.0f)));
+        mixKnob  .label.setFont (juce::Font (juce::FontOptions (11.0f)));
+        outputKnob.label.setFont (juce::Font (juce::FontOptions (11.0f)));
 
         driveKnob.label.setLookAndFeel (&knobLNF);
         toneKnob .label.setLookAndFeel (&knobLNF);
