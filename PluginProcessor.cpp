@@ -1154,10 +1154,9 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         }
     }
 
-    // Tone smoothing real (por bloque) antes de usar tilt
+    // -------------------------------------------------------------------------
+    // 0) Tone smoothing + tilt (SUB-BLOQUES) para evitar zipper/click con automatización rápida
     toneSm.setTargetValue (*pTone);
-    toneSm.skip (numSamples);
-    updateTiltCoeffs (toneSm.getCurrentValue());
 
     // Asegura wetBuffer sin realocar cada bloque
     if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < numSamples)
@@ -1167,24 +1166,41 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
     // -------------------------------------------------------------------------
-    // 1) WET base SR: pregain + tilt
-    for (int i = 0; i < numSamples; ++i)
+    // 1) WET base SR: pregain + tilt  (coef update cada 32 samples)
+    constexpr int kTiltUpdateStride = 32;
+
+    int i0 = 0;
+    while (i0 < numSamples)
     {
-        const float drive01 = driveSm.getNextValue();
-        const float pregain = juce::Decibels::decibelsToGain (plugin::mapDriveDb (drive01));
+        const int chunk = juce::jmin (kTiltUpdateStride, numSamples - i0);
 
-        float xL = ch0[i] * pregain;
-        xL = lowShelfL.processSample (xL);
-        xL = highShelfL.processSample (xL);
-        wetL[i] = xL;
+        // Actualiza coeficientes con el valor suavizado ACTUAL (sample&hold por sub-bloque)
+        updateTiltCoeffs (toneSm.getCurrentValue());
 
-        if (wetR != nullptr && ch1 != nullptr)
+        for (int k = 0; k < chunk; ++k)
         {
-            float xR = ch1[i] * pregain;
-            xR = lowShelfR.processSample (xR);
-            xR = highShelfR.processSample (xR);
-            wetR[i] = xR;
+            const int i = i0 + k;
+
+            const float drive01 = driveSm.getNextValue();
+            const float pregain = juce::Decibels::decibelsToGain (plugin::mapDriveDb (drive01));
+
+            float xL = ch0[i] * pregain;
+            xL = lowShelfL.processSample (xL);
+            xL = highShelfL.processSample (xL);
+            wetL[i] = xL;
+
+            if (wetR != nullptr && ch1 != nullptr)
+            {
+                float xR = ch1[i] * pregain;
+                xR = lowShelfR.processSample (xR);
+                xR = highShelfR.processSample (xR);
+                wetR[i] = xR;
+            }
         }
+
+        // Avanza el smoothing del Tone para el próximo sub-bloque
+        toneSm.skip (chunk);
+        i0 += chunk;
     }
 
     // -------------------------------------------------------------------------
@@ -1262,6 +1278,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     // -------------------------------------------------------------------------
     // 3) Mix + AUTO-LEVEL (volumen constante) - ULTRA (por muestra)
 
+    // ✅ 2.1) Robustecer safety:
+    // - headroom fijo antes del safety (evita que se active seguido)
+    // - clamp extra del autogain (por si se dispara)
+    const float safetyHeadroom = juce::Decibels::decibelsToGain (-0.9f);
+    const float maxAutoGain    = juce::Decibels::decibelsToGain (+12.0f);
+
     // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
     auto* dL = dryDelayBuffer.getWritePointer (0);
     auto* dR = (dryDelayBuffer.getNumChannels() > 1) ? dryDelayBuffer.getWritePointer (1) : nullptr;
@@ -1312,9 +1334,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         // AutoGain ULTRA: calcula ganancia desde dry vs mixed PRE gain
         const float g = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
 
-        ch0[i] = plugin::softClipSafety (mixedL * g);
+        // ✅ clamp extra del autogain + headroom antes del safety
+        const float gSafe = juce::jlimit (0.0f, maxAutoGain, g);
+
+        ch0[i] = plugin::softClipSafety (mixedL * gSafe * safetyHeadroom);
         if (ch1 != nullptr)
-            ch1[i] = plugin::softClipSafety (mixedR * g);
+            ch1[i] = plugin::softClipSafety (mixedR * gSafe * safetyHeadroom);
     }
 }
 
@@ -1324,3 +1349,5 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
+
