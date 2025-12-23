@@ -21,11 +21,11 @@
 //  C) Allpass “3D glue” (fase) post-trafo OUT y antes de loading (2 etapas)
 //  D) Dynamic HF de-esser ultra rápido (por eventos) que modula preEdge Fc
 //
-// API requerida por PresetRegistry PRO:
-//  - struct State
-//  - static void prepare(State&, float)
-//  - static void reset(State&)
-//  - static float process(State&, float)
+// ✅ PUNTO 4 (este cambio):
+//  - I/O sigue siendo float (firma del preset no cambia)
+//  - Camino interno en doble precisión (Real=double)
+//  - Estados sensibles (env/envP/sag, filtros, drift, allpass, etc.) pasan a double
+//  - Helpers críticas templadas para double
 
 #include <cmath>
 #include <cstdint>
@@ -33,7 +33,9 @@
 
 struct Preset_Neve1073
 {
-    static constexpr const char* kDisplayName = "Neve 1073 (PRO ULTIMATE HQ+ CAL/DRIFT/AP)";
+    static constexpr const char* kDisplayName = "Neve 1073";
+
+    using Real = double;
 
     struct State
     {
@@ -42,88 +44,84 @@ struct Preset_Neve1073
         // ---- Deterministic per-channel trim (tolerancias) ----
         float chanTrim = 0.0f; // [-1..+1] estable por instancia/canal
 
-        // ---- RMS envelope (medición perceptual) ----
-        float envP = 0.0f;   // potencia (EMA) (medida sobre señal HP)
-        float env  = 0.0f;   // sqrt(envP) con atk/rel (sobre RMS)
-        float sagEnv = 0.0f; // slow env (supply sag)
+        // ---- RMS envelope (medición perceptual) ---- (✅ double)
+        Real envP   = 0.0;   // potencia (EMA) (medida sobre señal HP)
+        Real env    = 0.0;   // sqrt(envP) con atk/rel (sobre RMS)
+        Real sagEnv = 0.0;   // slow env (supply sag)
 
-        // HPF states SOLO para medición del detector
-        float meas_x1 = 0.0f;
-        float meas_y1 = 0.0f;
+        // HPF states SOLO para medición del detector (✅ double)
+        Real meas_x1 = 0.0;
+        Real meas_y1 = 0.0;
 
-        // ---- DC blocker (audio path) ----
-        float dc_x1 = 0.0f;
-        float dc_y1 = 0.0f;
+        // ---- DC blocker (audio path) ---- (✅ double)
+        Real dc_x1 = 0.0;
+        Real dc_y1 = 0.0;
 
-        // ---- Asimetría pro: drift lento (temperatura/corriente) ----
-        float drift   = 0.0f; // [-1..+1] aprox (muy lento)
-        float driftLP = 0.0f; // lowpassed noise/source
+        // ---- Asimetría pro: drift lento (temperatura/corriente) ---- (✅ double)
+        Real drift   = 0.0; // [-1..+1] aprox (muy lento)
+        Real driftLP = 0.0; // lowpassed noise/source
 
-        // ---- Subsonic HPF via LP (hp = x - lp) ----
-        float sub_lp = 0.0f;
+        // ---- Subsonic HPF via LP (hp = x - lp) ---- (✅ double)
+        Real sub_lp = 0.0;
 
-        // ---- Pre-emphasis shelf via LP (high = x - lp) ----
-        float preShelf_lp = 0.0f;
+        // ---- Pre-emphasis shelf via LP (high = x - lp) ---- (✅ double)
+        Real preShelf_lp = 0.0;
 
-        // ---- Split low/high via LP ----
-        float split_lp = 0.0f;
+        // ---- Split low/high via LP ---- (✅ double)
+        Real split_lp = 0.0;
 
-        // ---- Transformer hysteresis (magnetización) ----
-        float magIn  = 0.0f;
-        float magOut = 0.0f;
+        // ---- Transformer hysteresis (magnetización) ---- (paso a double por estabilidad con OS alto)
+        Real magIn  = 0.0;
+        Real magOut = 0.0;
 
-        // Para eddy-loss: prev input por trafo
-        float trafoIn_prevX  = 0.0f;
-        float trafoOut_prevX = 0.0f;
+        // Para eddy-loss: prev input por trafo (✅ double)
+        Real trafoIn_prevX  = 0.0;
+        Real trafoOut_prevX = 0.0;
 
-        // ADAA memory for atan in transformers
-        float atanIn_x1  = 0.0f;
-        float atanOut_x1 = 0.0f;
+        // ADAA memory for atan in transformers (✅ double)
+        Real atanIn_x1  = 0.0;
+        Real atanOut_x1 = 0.0;
 
-        // ---- Dynamic HF de-esser (por eventos) para modular preEdge ----
-        float hf_lp  = 0.0f; // LP para medir HF = x - LP(x, 10k)
-        float hfEnv  = 0.0f; // env rápido de HF
+        // ---- Dynamic HF de-esser (por eventos) para modular preEdge ---- (✅ double)
+        Real hf_lp  = 0.0; // LP para medir HF = x - LP(x, 10k)
+        Real hfEnv  = 0.0; // env rápido de HF
 
-        // ---- Pre-edge LP (antes de amp1) ----
-        float preEdge_lp = 0.0f;
+        // ---- Pre-edge LP (antes de amp1) ---- (✅ double)
+        Real preEdge_lp = 0.0;
 
-        // ---- Slew limiting (path amp) ----
-        float slew_y = 0.0f;
+        // ---- Slew limiting (path amp) ---- (✅ double)
+        Real slew_y = 0.0;
 
-        // ---- ADAA memory amp stages ----
-        // Stage 1 usa ADAA2 -> necesita x1 y x2
-        float amp1_x1 = 0.0f;
-        float amp1_x2 = 0.0f;
+        // ---- ADAA memory amp stages ---- (✅ double; es feedback/smoothing)
+        Real amp1_x1 = 0.0;
+        Real amp1_x2 = 0.0;
+        Real amp2_x1 = 0.0;
 
-        // Stage 2 usa ADAA1
-        float amp2_x1 = 0.0f;
+        // ---- Interstage RC (pegamento) ---- (✅ double)
+        Real inter_lp = 0.0;
+        Real inter_hf = 0.0;
 
-        // ---- Interstage RC (pegamento) ----
-        float inter_lp = 0.0f; // para HP por sustracción
-        float inter_hf = 0.0f; // LP alto para rounding
+        // ---- Mid-forward pre / de-nasal post ---- (✅ double)
+        Real mid_hi_lp      = 0.0;
+        Real mid_lo_lp      = 0.0;
+        Real post_mid_hi_lp = 0.0;
+        Real post_mid_lo_lp = 0.0;
 
-        // ---- Mid-forward pre / de-nasal post ----
-        float mid_hi_lp = 0.0f;
-        float mid_lo_lp = 0.0f;
+        // ---- Allpass “3D glue” (post-trafo OUT) ---- (✅ double)
+        Real ap1_x1 = 0.0, ap1_y1 = 0.0;
+        Real ap2_x1 = 0.0, ap2_y1 = 0.0;
 
-        float post_mid_hi_lp = 0.0f;
-        float post_mid_lo_lp = 0.0f;
+        // ---- Loading / impedancias ---- (✅ double)
+        Real load_lp = 0.0;
 
-        // ---- Allpass “3D glue” (post-trafo OUT) ----
-        float ap1_x1 = 0.0f, ap1_y1 = 0.0f;
-        float ap2_x1 = 0.0f, ap2_y1 = 0.0f;
+        // Dip suave (sin biquads): band = LP_hi - LP_lo (18–30k aprox) (✅ double)
+        Real loadDip_hi_lp = 0.0;
+        Real loadDip_lo_lp = 0.0;
 
-        // ---- Loading / impedancias ----
-        float load_lp = 0.0f;
-
-        // Dip suave (sin biquads): band = LP_hi - LP_lo (18–30k aprox)
-        float loadDip_hi_lp = 0.0f;
-        float loadDip_lo_lp = 0.0f;
-
-        // ---- HF control ----
-        float deFizz_lp = 0.0f;
-        float post1_lp  = 0.0f;
-        float post2_lp  = 0.0f;
+        // ---- HF control ---- (✅ double)
+        Real deFizz_lp = 0.0;
+        Real post1_lp  = 0.0;
+        Real post2_lp  = 0.0;
 
         // ---- Tiny RNG (anti-denorm + drift source) ----
         uint32_t rng = 0x12345678u;
@@ -149,75 +147,80 @@ struct Preset_Neve1073
 
     static inline void reset (State& s) noexcept
     {
-        s.envP = 0.0f;
-        s.env  = 0.0f;
-        s.sagEnv = 0.0f;
+        s.envP = 0.0;
+        s.env  = 0.0;
+        s.sagEnv = 0.0;
 
-        s.meas_x1 = 0.0f;
-        s.meas_y1 = 0.0f;
+        s.meas_x1 = 0.0;
+        s.meas_y1 = 0.0;
 
-        s.dc_x1 = 0.0f;
-        s.dc_y1 = 0.0f;
+        s.dc_x1 = 0.0;
+        s.dc_y1 = 0.0;
 
-        s.drift   = 0.0f;
-        s.driftLP = 0.0f;
+        s.drift   = 0.0;
+        s.driftLP = 0.0;
 
-        s.sub_lp = 0.0f;
-        s.preShelf_lp = 0.0f;
-        s.split_lp = 0.0f;
+        s.sub_lp = 0.0;
+        s.preShelf_lp = 0.0;
+        s.split_lp = 0.0;
 
-        s.magIn  = 0.0f;
-        s.magOut = 0.0f;
+        s.magIn  = 0.0;
+        s.magOut = 0.0;
 
-        s.trafoIn_prevX  = 0.0f;
-        s.trafoOut_prevX = 0.0f;
+        s.trafoIn_prevX  = 0.0;
+        s.trafoOut_prevX = 0.0;
 
-        s.atanIn_x1  = 0.0f;
-        s.atanOut_x1 = 0.0f;
+        s.atanIn_x1  = 0.0;
+        s.atanOut_x1 = 0.0;
 
-        s.hf_lp = 0.0f;
-        s.hfEnv = 0.0f;
+        s.hf_lp = 0.0;
+        s.hfEnv = 0.0;
 
-        s.preEdge_lp = 0.0f;
-        s.slew_y = 0.0f;
+        s.preEdge_lp = 0.0;
+        s.slew_y = 0.0;
 
-        s.amp1_x1 = 0.0f;
-        s.amp1_x2 = 0.0f;
-        s.amp2_x1 = 0.0f;
+        s.amp1_x1 = 0.0;
+        s.amp1_x2 = 0.0;
+        s.amp2_x1 = 0.0;
 
-        s.inter_lp = 0.0f;
-        s.inter_hf = 0.0f;
+        s.inter_lp = 0.0;
+        s.inter_hf = 0.0;
 
-        s.mid_hi_lp = 0.0f;
-        s.mid_lo_lp = 0.0f;
+        s.mid_hi_lp = 0.0;
+        s.mid_lo_lp = 0.0;
 
-        s.post_mid_hi_lp = 0.0f;
-        s.post_mid_lo_lp = 0.0f;
+        s.post_mid_hi_lp = 0.0;
+        s.post_mid_lo_lp = 0.0;
 
-        s.ap1_x1 = s.ap1_y1 = 0.0f;
-        s.ap2_x1 = s.ap2_y1 = 0.0f;
+        s.ap1_x1 = s.ap1_y1 = 0.0;
+        s.ap2_x1 = s.ap2_y1 = 0.0;
 
-        s.load_lp = 0.0f;
-        s.loadDip_hi_lp = 0.0f;
-        s.loadDip_lo_lp = 0.0f;
+        s.load_lp = 0.0;
+        s.loadDip_hi_lp = 0.0;
+        s.loadDip_lo_lp = 0.0;
 
-        s.deFizz_lp = 0.0f;
-        s.post1_lp  = 0.0f;
-        s.post2_lp  = 0.0f;
+        s.deFizz_lp = 0.0;
+        s.post1_lp  = 0.0;
+        s.post2_lp  = 0.0;
 
         // re-seed suave
         s.rng ^= 0xA5A5A5A5u;
         if (s.rng == 0) s.rng = 0x12345678u;
     }
 
-    static inline float process (State& s, float x) noexcept
+    // ✅ I/O sigue float, interno Real (double)
+    static inline float process (State& s, float xIn) noexcept
     {
-        if (!std::isfinite (x))
+        if (!std::isfinite (xIn))
             return 0.0f;
 
         // Anti-denorm: solo si cae a valores ultrapequeños
-        if (std::fabs (x) < 1.0e-20f)
-            x += tinyNoiseDenormSafe (s);
+        if (std::fabs ((double) xIn) < 1.0e-20)
+            xIn += (float) tinyNoiseDenormSafe (s);
+
+        const Real sr = (Real) s.sr;
+
+        Real x = (Real) xIn;
 
         // ============================================================
         // Arquitectura HQ:
@@ -228,15 +231,15 @@ struct Preset_Neve1073
         // ============================================================
 
         // ---- Tolerancias por canal (±1–3%) ----
-        const float trimFc    = 1.0f + 0.015f * s.chanTrim; // ~±1.5%
-        const float trimDrive = 1.0f + 0.020f * s.chanTrim; // ~±2.0%
-        const float trimBias  = 1.0f + 0.030f * s.chanTrim; // ~±3.0%
+        const Real trimFc    = (Real) (1.0f + 0.015f * s.chanTrim);
+        const Real trimDrive = (Real) (1.0f + 0.020f * s.chanTrim);
+        const Real trimBias  = (Real) (1.0f + 0.030f * s.chanTrim);
 
         // ------------------------------------------------------------
         // 0) DC blocker (audio path)
         {
-            const float R = alphaFromHz (5.0f, s.sr);
-            const float y = (x - s.dc_x1) + R * s.dc_y1;
+            const Real R = alphaFromHzT ((Real) 5.0, sr);
+            const Real y = (x - s.dc_x1) + R * s.dc_y1;
             s.dc_x1 = x;
             s.dc_y1 = y;
             x = y;
@@ -244,112 +247,104 @@ struct Preset_Neve1073
 
         // ------------------------------------------------------------
         // ✅ A) Calibración headroom real (-18 dBFS ≈ 0 VU)
-        // Mapea -18 dBFS RMS (~0.1259) a ~1.0 interno antes de “analógico”.
-        // Luego devolvemos al final con kOutCal.
-        x *= kInCal;
+        x *= (Real) kInCal;
 
         // ------------------------------------------------------------
         // 1) Detector perceptual (HPF solo para medición) + env + sag
         {
-            // HP de medición (evita que el low-end domine) ~90Hz
-            const float aHP = std::exp (-2.0f * kPi * (90.0f / (float) s.sr));
-            const float xm  = onePoleHP (s.meas_x1, s.meas_y1, x, aHP);
+            // HP de medición ~90Hz
+            const Real aHP = std::exp (-2.0 * kPi * ((Real) 90.0 / sr));
+            const Real xm  = onePoleHPT (s.meas_x1, s.meas_y1, x, aHP);
 
-            const float p = xm * xm;
+            const Real p = xm * xm;
 
-            const float measMs = 16.0f;
-            const float aMeas  = alphaFromMs (measMs, s.sr);
-            s.envP = aMeas * s.envP + (1.0f - aMeas) * p;
+            const Real measMs = 16.0;
+            const Real aMeas  = alphaFromMsT (measMs, sr);
+            s.envP = aMeas * s.envP + (1.0 - aMeas) * p;
 
-            // clamps inteligentes (evita runaway)
-            s.envP = clampf (s.envP, 0.0f, 64.0f);
+            s.envP = clampT (s.envP, (Real) 0.0, (Real) 64.0);
 
-            const float inst = std::sqrt (s.envP + 1.0e-12f);
+            const Real inst = std::sqrt (s.envP + 1.0e-18);
 
-            const float atkMs = 2.7f;
-            const float relMs = 105.0f;
-            const float aAtk  = alphaFromMs (atkMs, s.sr);
-            const float aRel  = alphaFromMs (relMs, s.sr);
+            const Real atkMs = 2.7;
+            const Real relMs = 105.0;
+            const Real aAtk  = alphaFromMsT (atkMs, sr);
+            const Real aRel  = alphaFromMsT (relMs, sr);
 
-            const float a = (inst > s.env) ? aAtk : aRel;
-            s.env = a * s.env + (1.0f - a) * inst;
+            const Real a = (inst > s.env) ? aAtk : aRel;
+            s.env = a * s.env + (1.0 - a) * inst;
 
             // sag lento
-            const float sagMs = 260.0f;
-            const float aSag  = alphaFromMs (sagMs, s.sr);
-            s.sagEnv = aSag * s.sagEnv + (1.0f - aSag) * inst;
-
-            s.sagEnv = clampf (s.sagEnv, 0.0f, 16.0f);
+            const Real sagMs = 260.0;
+            const Real aSag  = alphaFromMsT (sagMs, sr);
+            s.sagEnv = aSag * s.sagEnv + (1.0 - aSag) * inst;
+            s.sagEnv = clampT (s.sagEnv, (Real) 0.0, (Real) 16.0);
         }
 
-        const float env01 = clamp01 (s.env * 1.60f);
-        const float sag01 = clamp01 (s.sagEnv * 1.15f);
+        const Real env01 = clamp01T (s.env * (Real) 1.60);
+        const Real sag01 = clamp01T (s.sagEnv * (Real) 1.15);
 
         // Sag gain (sutil)
         {
-            const float sagAmt = 0.18f;
-            const float sagG   = 1.0f / (1.0f + sagAmt * (s.sagEnv * 1.25f));
+            const Real sagAmt = 0.18;
+            const Real sagG   = 1.0 / (1.0 + sagAmt * (s.sagEnv * 1.25));
             x *= sagG;
         }
 
         // ------------------------------------------------------------
         // ✅ B) Asimetría “real”: dependiente de nivel + drift lento con leak
-        // - Drift ultralento (simula temperatura/corriente). Leak hacia 0.
-        // - Pares sin DC: x += evenAmt * (x * abs(x))
         {
-            // drift source (muy pequeño, cero-mean), reutiliza RNG
-            float n = tinyNoiseBipolar (s); // [-1..+1] aprox
+            const Real n = tinyNoiseBipolar (s); // [-1..+1]
 
-            // filtra MUY lento para que “camine” suave
-            const float aLP = alphaFromHz (0.02f, s.sr);     // ~0.02 Hz (muy lento)
-            s.driftLP = onePoleLP (s.driftLP, n, aLP);
+            const Real aLP = alphaFromHzT ((Real) 0.02, sr); // ~0.02 Hz
+            s.driftLP = onePoleLPT (s.driftLP, n, aLP);
 
-            // leak a 0 (no se queda pegado)
-            const float leakAlpha = std::exp (-1.0f / (35.0f * (float) s.sr)); // ~35s
-            s.drift = s.drift * leakAlpha + (1.0f - leakAlpha) * s.driftLP;
+            const Real leakAlpha = std::exp (-1.0 / ((Real) 35.0 * sr)); // ~35s
+            s.drift = s.drift * leakAlpha + (1.0 - leakAlpha) * s.driftLP;
+            s.drift = clampT (s.drift, (Real) -1.0, (Real) 1.0);
 
-            s.drift = clampf (s.drift, -1.0f, 1.0f);
+            const Real baseEven =
+                ((Real) 0.0045 + (Real) 0.0140 * env01 + (Real) 0.0060 * sag01)
+                * (Real) (1.0f + 0.08f * s.chanTrim);
 
-            // even amount depende de nivel (env) y “supply” (sag), con micro variación por drift
-            const float baseEven = (0.0045f + 0.0140f * env01 + 0.0060f * sag01) * (1.0f + 0.08f * s.chanTrim);
-            float evenMul = 1.0f + 0.35f * s.drift;
-            evenMul = clampf (evenMul, 0.65f, 1.35f);
-            const float evenAmt = baseEven * evenMul;
+            Real evenMul = 1.0 + (Real) 0.35 * s.drift;
+            evenMul = clampT (evenMul, (Real) 0.65, (Real) 1.35);
 
+            const Real evenAmt = baseEven * evenMul;
             x += evenAmt * (x * std::fabs (x));
         }
 
         // ------------------------------------------------------------
         // 2) Subsonic HPF (hp = x - lp)
         {
-            const float fc = 18.0f * trimFc;
-            const float a  = alphaFromHz (fc, s.sr);
-            s.sub_lp = onePoleLP (s.sub_lp, x, a);
+            const Real fc = (Real) 18.0 * trimFc;
+            const Real a  = alphaFromHzT (fc, sr);
+            s.sub_lp = onePoleLPT (s.sub_lp, x, a);
             x = x - s.sub_lp;
         }
 
         // ------------------------------------------------------------
-        // 3) Pre-emphasis shelf (menos brillante al empujar)
+        // 3) Pre-emphasis shelf
         {
-            const float fc = (4100.0f - 1300.0f * env01) * trimFc;
-            const float a  = alphaFromHz (clampHz (fc, 1800.0f, 6500.0f), s.sr);
+            const Real fc = ((Real) 4100.0 - (Real) 1300.0 * env01) * trimFc;
+            const Real a  = alphaFromHzT (clampT (fc, (Real) 1800.0, (Real) 6500.0), sr);
 
-            s.preShelf_lp = onePoleLP (s.preShelf_lp, x, a);
-            const float high = x - s.preShelf_lp;
+            s.preShelf_lp = onePoleLPT (s.preShelf_lp, x, a);
+            const Real high = x - s.preShelf_lp;
 
-            const float shelfGain = 0.05f + 0.24f * env01;
+            const Real shelfGain = (Real) 0.05 + (Real) 0.24 * env01;
             x = x + shelfGain * high;
         }
 
         // ------------------------------------------------------------
-        // 4) Split low/high (Fc dinámica)
-        float low = 0.0f;
-        float high = 0.0f;
+        // 4) Split low/high
+        Real low = 0.0;
+        Real high = 0.0;
         {
-            const float splitFc = (1850.0f - 720.0f * env01) * trimFc;
-            const float a = alphaFromHz (clampHz (splitFc, 850.0f, 2600.0f), s.sr);
+            const Real splitFc = ((Real) 1850.0 - (Real) 720.0 * env01) * trimFc;
+            const Real a = alphaFromHzT (clampT (splitFc, (Real) 850.0, (Real) 2600.0), sr);
 
-            s.split_lp = onePoleLP (s.split_lp, x, a);
+            s.split_lp = onePoleLPT (s.split_lp, x, a);
             low  = s.split_lp;
             high = x - low;
         }
@@ -357,184 +352,176 @@ struct Preset_Neve1073
         // ------------------------------------------------------------
         // 5) Drives por banda
         {
-            const float driveLo = (1.00f + 0.38f * env01) * trimDrive;
-            const float driveHi = (1.00f + 0.92f * env01) * trimDrive;
+            const Real driveLo = ((Real) 1.00 + (Real) 0.38 * env01) * trimDrive;
+            const Real driveHi = ((Real) 1.00 + (Real) 0.92 * env01) * trimDrive;
 
             low  *= driveLo;
             high *= driveHi;
         }
 
         // ------------------------------------------------------------
-        // 6) Trafo IN (hyst + ADAA atan) con leak + eddy + sag->drive/bias
+        // 6) Trafo IN
         low = transformerHystADAA_HQ (
             s.magIn, s.trafoIn_prevX, s.atanIn_x1,
-            low, env01, sag01, s.sr,
-            55.0f * trimFc,
-            0.24f,
-            2.08f * trimDrive,
-            0.012f * trimBias,
-            0.14f
+            low, env01, sag01, sr,
+            (Real) 55.0 * trimFc,
+            (Real) 0.24,
+            (Real) 2.08 * trimDrive,
+            (Real) 0.012 * trimBias,
+            (Real) 0.14
         );
 
         // ------------------------------------------------------------
-        // 7) HIGH: mid-forward → HF de-esser → pre-edge LP → slew → amp1 → inter → amp2 → de-nasal
+        // 7) HIGH: mid-forward → HF de-esser → pre-edge → slew → amp1 → inter → amp2 → de-nasal
 
-        // 7.a) Mid-forward pre-amp (band = LP_hi - LP_lo)
+        // 7.a) Mid-forward
         {
-            const float fcHi = (2200.0f - 500.0f * env01) * trimFc;
-            const float fcLo = (350.0f  - 120.0f * env01) * trimFc;
+            const Real fcHi = ((Real) 2200.0 - (Real) 500.0 * env01) * trimFc;
+            const Real fcLo = ((Real) 350.0  - (Real) 120.0 * env01) * trimFc;
 
-            const float aHi = alphaFromHz (clampHz (fcHi, 1200.0f, 3200.0f), s.sr);
-            const float aLo = alphaFromHz (clampHz (fcLo,  180.0f,  650.0f), s.sr);
+            const Real aHi = alphaFromHzT (clampT (fcHi, (Real) 1200.0, (Real) 3200.0), sr);
+            const Real aLo = alphaFromHzT (clampT (fcLo, (Real)  180.0, (Real)  650.0), sr);
 
-            s.mid_hi_lp = onePoleLP (s.mid_hi_lp, high, aHi);
-            s.mid_lo_lp = onePoleLP (s.mid_lo_lp, high, aLo);
+            s.mid_hi_lp = onePoleLPT (s.mid_hi_lp, high, aHi);
+            s.mid_lo_lp = onePoleLPT (s.mid_lo_lp, high, aLo);
 
-            const float midBand = s.mid_hi_lp - s.mid_lo_lp;
+            const Real midBand = s.mid_hi_lp - s.mid_lo_lp;
 
-            const float gDb = 0.15f + 1.35f * env01; // 0..~1.5dB
-            const float g   = dbToLin (gDb) - 1.0f;
+            const Real gDb = (Real) 0.15 + (Real) 1.35 * env01;
+            const Real g   = dbToLinT (gDb) - 1.0;
 
             high = high + midBand * g;
         }
 
-        // 7.b) ✅ D) Dynamic HF de-esser ultra rápido (por eventos)
-        // mide HF > ~10k y baja preEdge Fc cuando hay exceso (platos/sibilancias)
-        float hf01 = 0.0f;
+        // 7.b) ✅ D) HF de-esser ultra rápido
+        Real hf01 = 0.0;
         {
-            const float fcMeas = 10000.0f * trimFc;
-            const float aMeas  = alphaFromHz (clampHz (fcMeas, 6500.0f, 18000.0f), s.sr);
+            const Real fcMeas = (Real) 10000.0 * trimFc;
+            const Real aMeas  = alphaFromHzT (clampT (fcMeas, (Real) 6500.0, (Real) 18000.0), sr);
 
-            s.hf_lp = onePoleLP (s.hf_lp, high, aMeas);
-            const float hf = high - s.hf_lp;        // “aire/agresivo”
-            const float e  = std::fabs (hf);        // detector rápido (barato)
+            s.hf_lp = onePoleLPT (s.hf_lp, high, aMeas);
+            const Real hf = high - s.hf_lp;
+            const Real e  = std::fabs (hf);
 
-            const float aAtk = alphaFromMs (0.6f, s.sr);
-            const float aRel = alphaFromMs (18.0f, s.sr);
-            const float a    = (e > s.hfEnv) ? aAtk : aRel;
+            const Real aAtk = alphaFromMsT ((Real) 0.6, sr);
+            const Real aRel = alphaFromMsT ((Real) 18.0, sr);
+            const Real a    = (e > s.hfEnv) ? aAtk : aRel;
 
-            s.hfEnv = a * s.hfEnv + (1.0f - a) * e;
-            s.hfEnv = clampf (s.hfEnv, 0.0f, 8.0f);
+            s.hfEnv = a * s.hfEnv + (1.0 - a) * e;
+            s.hfEnv = clampT (s.hfEnv, (Real) 0.0, (Real) 8.0);
 
-            // escala: 0..1 solo cuando de verdad hay HF fuerte
-            hf01 = clamp01 (s.hfEnv * 1.75f);
+            hf01 = clamp01T (s.hfEnv * (Real) 1.75);
         }
 
-        // 7.c) Pre-edge LP real (anti-fizz) antes del shaper
+        // 7.c) Pre-edge LP
         {
-            // base fc ~ 55k -> ~25–30k (env/sag) + mod por hf01 (solo cuando hace falta)
-            float fc = (55000.0f - 26000.0f * env01 - 9000.0f * sag01) * trimFc;
+            Real fc = ((Real) 55000.0 - (Real) 26000.0 * env01 - (Real) 9000.0 * sag01) * trimFc;
+            fc *= (1.0 - (Real) 0.32 * hf01);
 
-            // ✅ modulación de-esser: baja fc hasta ~32% cuando hf01→1
-            fc *= (1.0f - 0.32f * hf01);
+            const Real a  = alphaFromHzT (clampT (fc, (Real) 16000.0, (Real) 90000.0), sr);
 
-            const float a  = alphaFromHz (clampHz (fc, 16000.0f, 90000.0f), s.sr);
-
-            s.preEdge_lp = onePoleLP (s.preEdge_lp, high, a);
+            s.preEdge_lp = onePoleLPT (s.preEdge_lp, high, a);
             high = s.preEdge_lp;
         }
 
-        // 7.d) Slew limiting sutil (en oversampled)
+        // 7.d) Slew limiting
         {
-            float slewMax = 1.15f - 0.55f * env01 - 0.10f * sag01;
-            slewMax = clampf (slewMax, 0.25f, 1.35f);
+            Real slewMax = (Real) 1.15 - (Real) 0.55 * env01 - (Real) 0.10 * sag01;
+            slewMax = clampT (slewMax, (Real) 0.25, (Real) 1.35);
 
-            const float dy = clampf (high - s.slew_y, -slewMax, +slewMax);
+            const Real dy = clampT (high - s.slew_y, -slewMax, +slewMax);
             s.slew_y += dy;
             high = s.slew_y;
         }
 
-        // 7.e) Amp stage 1 (ADAA2 tanh) + sag afecta "softness"
-        float y1 = ampStage1ADAA2 (s, high, env01, sag01);
+        // 7.e) Amp stage 1 (ADAA2 tanh)
+        Real y1 = ampStage1ADAA2 (s, high, env01, sag01);
 
-        // 7.f) Interstage RC: HP suave + LP alto
+        // 7.f) Interstage RC
         {
-            const float aHP = alphaFromHz (35.0f * trimFc, s.sr);
-            s.inter_lp = onePoleLP (s.inter_lp, y1, aHP);
-            float z = y1 - s.inter_lp;
+            const Real aHP = alphaFromHzT ((Real) 35.0 * trimFc, sr);
+            s.inter_lp = onePoleLPT (s.inter_lp, y1, aHP);
+            Real z = y1 - s.inter_lp;
 
-            const float aLP = alphaFromHz ((52000.0f - 18000.0f * env01) * trimFc, s.sr);
-            s.inter_hf = onePoleLP (s.inter_hf, z, aLP);
+            const Real aLP = alphaFromHzT (((Real) 52000.0 - (Real) 18000.0 * env01) * trimFc, sr);
+            s.inter_hf = onePoleLPT (s.inter_hf, z, aLP);
             y1 = s.inter_hf;
         }
 
-        // 7.g) Amp stage 2 (ADAA1) + hair refinado
-        float y2 = ampStage2ADAA (s, y1, env01, sag01);
+        // 7.g) Amp stage 2 (ADAA1)
+        Real y2 = ampStage2ADAA (s, y1, env01, sag01);
 
-        // 7.h) Post de-nasal (suave)
+        // 7.h) De-nasal post
         {
-            const float fcHi = 2400.0f * trimFc;
-            const float fcLo = 420.0f  * trimFc;
+            const Real fcHi = (Real) 2400.0 * trimFc;
+            const Real fcLo = (Real)  420.0 * trimFc;
 
-            const float aHi = alphaFromHz (fcHi, s.sr);
-            const float aLo = alphaFromHz (fcLo, s.sr);
+            const Real aHi = alphaFromHzT (fcHi, sr);
+            const Real aLo = alphaFromHzT (fcLo, sr);
 
-            s.post_mid_hi_lp = onePoleLP (s.post_mid_hi_lp, y2, aHi);
-            s.post_mid_lo_lp = onePoleLP (s.post_mid_lo_lp, y2, aLo);
+            s.post_mid_hi_lp = onePoleLPT (s.post_mid_hi_lp, y2, aHi);
+            s.post_mid_lo_lp = onePoleLPT (s.post_mid_lo_lp, y2, aLo);
 
-            const float midBand = s.post_mid_hi_lp - s.post_mid_lo_lp;
+            const Real midBand = s.post_mid_hi_lp - s.post_mid_lo_lp;
 
-            const float gDb = 0.10f + 0.65f * env01;
-            const float g   = dbToLin (gDb) - 1.0f;
+            const Real gDb = (Real) 0.10 + (Real) 0.65 * env01;
+            const Real g   = dbToLinT (gDb) - 1.0;
 
             y2 = y2 - midBand * g;
         }
 
-        high = y2;
-
-        float y = low + high;
+        Real y = low + y2;
 
         // ------------------------------------------------------------
-        // 8) Trafo OUT (hyst + ADAA atan) con leak + eddy + sag->drive/bias
+        // 8) Trafo OUT
         y = transformerHystADAA_HQ (
             s.magOut, s.trafoOut_prevX, s.atanOut_x1,
-            y, env01, sag01, s.sr,
-            42.0f * trimFc,
-            0.19f,
-            1.88f * trimDrive,
-            0.008f * trimBias,
-            0.12f
+            y, env01, sag01, sr,
+            (Real) 42.0 * trimFc,
+            (Real) 0.19,
+            (Real) 1.88 * trimDrive,
+            (Real) 0.008 * trimBias,
+            (Real) 0.12
         );
 
         // ------------------------------------------------------------
-        // ✅ C) Allpass “3D glue” (fase): después del trafo OUT y antes del loading
+        // ✅ C) Allpass “3D glue”
         {
-            // Frecuencias suaves y dependientes de env/sag. 2 etapas para más “depth”.
-            const float f1 = (650.0f  + 950.0f  * env01 + 250.0f * sag01) * trimFc;
-            const float f2 = (1800.0f + 1400.0f * env01 + 350.0f * sag01) * trimFc;
+            const Real f1 = ((Real) 650.0  + (Real) 950.0  * env01 + (Real) 250.0 * sag01) * trimFc;
+            const Real f2 = ((Real) 1800.0 + (Real) 1400.0 * env01 + (Real) 350.0 * sag01) * trimFc;
 
-            const float a1 = allpassCoefFromHz (clampHz (f1, 120.0f, 8000.0f),  s.sr);
-            const float a2 = allpassCoefFromHz (clampHz (f2, 240.0f, 12000.0f), s.sr);
+            const Real a1 = allpassCoefFromHzT (clampT (f1, (Real) 120.0, (Real) 8000.0),  sr);
+            const Real a2 = allpassCoefFromHzT (clampT (f2, (Real) 240.0, (Real) 12000.0), sr);
 
-            y = allpass1 (y, s.ap1_x1, s.ap1_y1, a1);
-            y = allpass1 (y, s.ap2_x1, s.ap2_y1, a2);
+            y = allpass1T (y, s.ap1_x1, s.ap1_y1, a1);
+            y = allpass1T (y, s.ap2_x1, s.ap2_y1, a2);
         }
 
         // ------------------------------------------------------------
-        // 9) Loading LP dinámico (hardware top-end)
+        // 9) Loading LP dinámico
         {
-            const float fc = (65000.0f - 38000.0f * (0.65f * env01 + 0.35f * sag01)) * trimFc;
-            const float a  = alphaFromHz (clampHz (fc, 18000.0f, 90000.0f), s.sr);
+            const Real fc = ((Real) 65000.0 - (Real) 38000.0 * ((Real) 0.65 * env01 + (Real) 0.35 * sag01)) * trimFc;
+            const Real a  = alphaFromHzT (clampT (fc, (Real) 18000.0, (Real) 90000.0), sr);
 
-            s.load_lp = onePoleLP (s.load_lp, y, a);
+            s.load_lp = onePoleLPT (s.load_lp, y, a);
             y = s.load_lp;
         }
 
-        // 10) Dip suave 18–30k (sin biquads)
+        // 10) Dip suave 18–30k
         {
-            const float fcHi = (30000.0f - 7000.0f * env01) * trimFc;
-            const float fcLo = (18000.0f - 4000.0f * env01) * trimFc;
+            const Real fcHi = ((Real) 30000.0 - (Real) 7000.0 * env01) * trimFc;
+            const Real fcLo = ((Real) 18000.0 - (Real) 4000.0 * env01) * trimFc;
 
-            const float aHi = alphaFromHz (clampHz (fcHi, 14000.0f, 60000.0f), s.sr);
-            const float aLo = alphaFromHz (clampHz (fcLo,  9000.0f, 45000.0f), s.sr);
+            const Real aHi = alphaFromHzT (clampT (fcHi, (Real) 14000.0, (Real) 60000.0), sr);
+            const Real aLo = alphaFromHzT (clampT (fcLo, (Real)  9000.0, (Real) 45000.0), sr);
 
-            s.loadDip_hi_lp = onePoleLP (s.loadDip_hi_lp, y, aHi);
-            s.loadDip_lo_lp = onePoleLP (s.loadDip_lo_lp, y, aLo);
+            s.loadDip_hi_lp = onePoleLPT (s.loadDip_hi_lp, y, aHi);
+            s.loadDip_lo_lp = onePoleLPT (s.loadDip_lo_lp, y, aLo);
 
-            const float band = s.loadDip_hi_lp - s.loadDip_lo_lp;
+            const Real band = s.loadDip_hi_lp - s.loadDip_lo_lp;
 
-            const float dipDb = 0.05f + 0.75f * env01;
-            const float g = dbToLin (dipDb) - 1.0f;
+            const Real dipDb = (Real) 0.05 + (Real) 0.75 * env01;
+            const Real g     = dbToLinT (dipDb) - 1.0;
 
             y = y - band * g;
         }
@@ -542,33 +529,34 @@ struct Preset_Neve1073
         // ------------------------------------------------------------
         // 11) De-fizz dinámico
         {
-            const float fc = (19500.0f - 12000.0f * env01) * trimFc;
-            const float a  = alphaFromHz (clampHz (fc, 6000.0f, 24000.0f), s.sr);
+            const Real fc = ((Real) 19500.0 - (Real) 12000.0 * env01) * trimFc;
+            const Real a  = alphaFromHzT (clampT (fc, (Real) 6000.0, (Real) 24000.0), sr);
 
-            s.deFizz_lp = onePoleLP (s.deFizz_lp, y, a);
+            s.deFizz_lp = onePoleLPT (s.deFizz_lp, y, a);
             y = s.deFizz_lp;
         }
 
         // ------------------------------------------------------------
         // 12) Post HF damping 2 polos
         {
-            const float fc = (25500.0f - 16000.0f * env01) * trimFc;
-            const float a  = alphaFromHz (clampHz (fc, 8000.0f, 32000.0f), s.sr);
+            const Real fc = ((Real) 25500.0 - (Real) 16000.0 * env01) * trimFc;
+            const Real a  = alphaFromHzT (clampT (fc, (Real) 8000.0, (Real) 32000.0), sr);
 
-            s.post1_lp = onePoleLP (s.post1_lp, y, a);
-            s.post2_lp = onePoleLP (s.post2_lp, s.post1_lp, a);
+            s.post1_lp = onePoleLPT (s.post1_lp, y, a);
+            s.post2_lp = onePoleLPT (s.post2_lp, s.post1_lp, a);
             y = s.post2_lp;
         }
 
         // ------------------------------------------------------------
-        // ✅ A) Calibración de salida (vuelve a dominio digital)
-        y *= kOutCal;
+        // ✅ A) Calibración de salida
+        y *= (Real) kOutCal;
 
         // Seguridad final
         if (!std::isfinite (y))
             return 0.0f;
 
-        return clampf (y, -1.20f, 1.20f);
+        y = clampT (y, (Real) -1.20, (Real) 1.20);
+        return (float) y;
     }
 
     // Legacy stateless (por si alguien lo llama)
@@ -584,65 +572,73 @@ struct Preset_Neve1073
     }
 
 private:
-    // ------------------ utilities ------------------
-
-    static constexpr float kPi  = 3.14159265358979323846f;
-    static constexpr float kLn2 = 0.69314718055994530942f;
+    // ------------------ constants ------------------
+    static constexpr Real kPi  = 3.141592653589793238462643383279502884;
+    static constexpr Real kLn2 = 0.693147180559945309417232121458176568;
 
     // ✅ Calibración -18 dBFS ≈ 0 VU
-    static constexpr float kInCal  = 7.943282347242814f;   // 10^(+18/20)
-    static constexpr float kOutCal = 0.12589254117941673f; // 10^(-18/20)
+    static constexpr float kInCal  = 7.943282347242814f;    // 10^(+18/20)
+    static constexpr float kOutCal = 0.12589254117941673f;  // 10^(-18/20)
 
+    // ------------------ float clamp for legacy/stateless ------------------
     static inline float clampf (float v, float lo, float hi) noexcept
     {
         return (v < lo) ? lo : (v > hi) ? hi : v;
     }
 
-    static inline float clamp01 (float v) noexcept
-    {
-        return (v < 0.0f) ? 0.0f : (v > 1.0f) ? 1.0f : v;
-    }
-
-    static inline float clampHz (float v, float lo, float hi) noexcept
+    // ------------------ templated/double helpers (critical) ------------------
+    template <typename T>
+    static inline T clampT (T v, T lo, T hi) noexcept
     {
         return (v < lo) ? lo : (v > hi) ? hi : v;
     }
 
-    static inline float onePoleLP (float y1, float x, float a) noexcept
+    template <typename T>
+    static inline T clamp01T (T v) noexcept
     {
-        return (1.0f - a) * x + a * y1;
+        return (v < (T) 0) ? (T) 0 : (v > (T) 1) ? (T) 1 : v;
     }
 
-    static inline float onePoleHP (float& x1, float& y1, float x, float a) noexcept
+    template <typename T>
+    static inline T onePoleLPT (T y1, T x, T a) noexcept
     {
-        const float y = a * (y1 + x - x1);
+        return ((T) 1 - a) * x + a * y1;
+    }
+
+    template <typename T>
+    static inline T onePoleHPT (T& x1, T& y1, T x, T a) noexcept
+    {
+        const T y = a * (y1 + x - x1);
         x1 = x;
         y1 = y;
         return y;
     }
 
-    static inline float alphaFromHz (float fc, float sr) noexcept
+    template <typename T>
+    static inline T alphaFromHzT (T fc, T sr) noexcept
     {
-        const float safeSr = (sr > 1.0f ? sr : 1.0f);
-        return std::exp (-2.0f * kPi * (fc / safeSr));
+        const T safeSr = (sr > (T) 1 ? sr : (T) 1);
+        return std::exp ((T) (-2) * (T) kPi * (fc / safeSr));
     }
 
-    static inline float alphaFromMs (float ms, float sr) noexcept
+    template <typename T>
+    static inline T alphaFromMsT (T ms, T sr) noexcept
     {
-        const float tau = ms * 0.001f;
-        const float safeSr = (sr > 1.0f ? sr : 1.0f);
-        const float denom = tau * safeSr;
-        if (denom <= 1.0e-6f) return 0.0f;
-        return std::exp (-1.0f / denom);
+        const T tau = ms * (T) 0.001;
+        const T safeSr = (sr > (T) 1 ? sr : (T) 1);
+        const T denom = tau * safeSr;
+        if (denom <= (T) 1.0e-12) return (T) 0;
+        return std::exp ((T) (-1) / denom);
     }
 
-    static inline float dbToLin (float db) noexcept
+    template <typename T>
+    static inline T dbToLinT (T db) noexcept
     {
-        return std::exp (0.1151292546497022842f * db); // ln(10)/20
+        // ln(10)/20
+        return std::exp ((T) 0.1151292546497022842 * db);
     }
 
     // ------------------ anti-denorm + tiny RNG helpers ------------------
-
     static inline uint32_t xorshift32 (uint32_t& state) noexcept
     {
         uint32_t x = state;
@@ -653,65 +649,67 @@ private:
         return state;
     }
 
-    static inline float tinyNoiseDenormSafe (State& s) noexcept
+    static inline Real tinyNoiseDenormSafe (State& s) noexcept
     {
         const uint32_t r = xorshift32 (s.rng);
-        const float r01 = (float) (r & 0xFFFFu) * (1.0f / 65535.0f);
-        const float n = (r01 - 0.5f) * 2.0f;     // [-1..+1]
-        return n * 1.0e-20f;                     // ultra pequeño
+        const Real r01 = (Real) (r & 0xFFFFu) * ((Real) 1.0 / (Real) 65535.0);
+        const Real n = (r01 - (Real) 0.5) * (Real) 2.0;     // [-1..+1]
+        return n * (Real) 1.0e-20;                          // ultra pequeño
     }
 
-    static inline float tinyNoiseBipolar (State& s) noexcept
+    static inline Real tinyNoiseBipolar (State& s) noexcept
     {
         const uint32_t r = xorshift32 (s.rng);
-        const float r01 = (float) (r & 0xFFFFu) * (1.0f / 65535.0f);
-        return (r01 - 0.5f) * 2.0f; // [-1..+1]
+        const Real r01 = (Real) (r & 0xFFFFu) * ((Real) 1.0 / (Real) 65535.0);
+        return (r01 - (Real) 0.5) * (Real) 2.0; // [-1..+1]
     }
 
     // ------------------ allpass “3D glue” ------------------
-
-    static inline float allpassCoefFromHz (float fc, float sr) noexcept
+    template <typename T>
+    static inline T allpassCoefFromHzT (T fc, T sr) noexcept
     {
         // 1st-order allpass coef from fc:
         // a = (1 - tan(w/2)) / (1 + tan(w/2)), w = 2*pi*fc/sr
-        const float safeSr = (sr > 1.0f ? sr : 1.0f);
-        const float w = kPi * (fc / safeSr); // w/2 = pi*fc/sr
-        const float t = std::tan (w);
-        const float a = (1.0f - t) / (1.0f + t);
-        return clampf (a, 0.0f, 0.9999f);
+        const T safeSr = (sr > (T) 1 ? sr : (T) 1);
+        const T w = (T) kPi * (fc / safeSr); // w/2 = pi*fc/sr
+        const T t = std::tan (w);
+        const T a = ((T) 1 - t) / ((T) 1 + t);
+        return clampT (a, (T) 0, (T) 0.9999);
     }
 
-    static inline float allpass1 (float x, float& x1, float& y1, float a) noexcept
+    template <typename T>
+    static inline T allpass1T (T x, T& x1, T& y1, T a) noexcept
     {
         // y = -a*x + x1 + a*y1
-        const float y = (-a * x) + x1 + (a * y1);
+        const T y = (-a * x) + x1 + (a * y1);
         x1 = x;
         y1 = y;
         return y;
     }
 
-    // ------------------ ADAA helpers ------------------
-
-    static inline float logCoshStable (float z) noexcept
+    // ------------------ ADAA helpers (double path) ------------------
+    template <typename T>
+    static inline T logCoshStableT (T z) noexcept
     {
-        const float az = std::fabs (z);
-        if (az > 10.0f)
-            return az - kLn2;
+        const T az = std::fabs (z);
+        if (az > (T) 10)
+            return az - (T) kLn2;
         return std::log (std::cosh (z));
     }
 
-    static inline float adaaTanh1 (float x, float& x1, float k) noexcept
+    template <typename T>
+    static inline T adaaTanh1T (T x, T& x1, T k) noexcept
     {
-        const float denom = (x - x1);
-        float y;
+        const T denom = (x - x1);
+        T y;
 
-        if (std::fabs (denom) > 1.0e-8f)
+        if (std::fabs (denom) > (T) 1.0e-12)
         {
-            const float kx  = k * x;
-            const float kx1 = k * x1;
+            const T kx  = k * x;
+            const T kx1 = k * x1;
 
-            const float Fx  = logCoshStable (kx)  / k;
-            const float Fx1 = logCoshStable (kx1) / k;
+            const T Fx  = logCoshStableT (kx)  / k;
+            const T Fx1 = logCoshStableT (kx1) / k;
 
             y = (Fx - Fx1) / denom;
         }
@@ -722,8 +720,8 @@ private:
 
         x1 = x;
 
-        const float d = std::tanh (k);
-        return (d > 1.0e-12f) ? (y / d) : y;
+        const T d = std::tanh (k);
+        return (std::fabs (d) > (T) 1.0e-18) ? (y / d) : y;
     }
 
     static inline double li2_series_neg1_0 (double x) noexcept
@@ -771,20 +769,24 @@ private:
         return (kk > 1.0e-18) ? (I / kk) : 0.0;
     }
 
-    static inline float adaaTanh2 (float x, float& x1, float& x2, float k) noexcept
+    template <typename T>
+    static inline T adaaTanh2T (T x, T& x1, T& x2, T k) noexcept
     {
-        const float z = k * x;
-        const bool use2 = (std::fabs (z) > 0.25f);
+        const T z = k * x;
+        const bool use2 = (std::fabs (z) > (T) 0.25);
 
-        const float d01 = (x - x1);
-        const float d12 = (x1 - x2);
-        const float d02 = (x - x2);
+        const T d01 = (x  - x1);
+        const T d12 = (x1 - x2);
+        const T d02 = (x  - x2);
 
-        float y;
+        T y;
 
-        if (!use2 || std::fabs (d01) < 1.0e-7f || std::fabs (d12) < 1.0e-7f || std::fabs (d02) < 1.0e-7f)
+        if (!use2
+            || std::fabs (d01) < (T) 1.0e-12
+            || std::fabs (d12) < (T) 1.0e-12
+            || std::fabs (d02) < (T) 1.0e-12)
         {
-            y = adaaTanh1 (x, x1, k);
+            y = adaaTanh1T (x, x1, k);
             x2 = x1;
             return y;
         }
@@ -799,10 +801,10 @@ private:
         double yd = 2.0 * (s0 - s1) / (double) d02;
 
         const double norm = std::tanh ((double) k);
-        if (std::fabs (norm) > 1.0e-12)
+        if (std::fabs (norm) > 1.0e-18)
             yd /= norm;
 
-        y = (float) yd;
+        y = (T) yd;
 
         x2 = x1;
         x1 = x;
@@ -810,20 +812,21 @@ private:
         return y;
     }
 
-    static inline float adaaAtan1 (float x, float& x1, float k) noexcept
+    template <typename T>
+    static inline T adaaAtan1T (T x, T& x1, T k) noexcept
     {
-        constexpr float twoOverPi = 0.63661977236758134308f; // 2/pi
+        constexpr double twoOverPi = 0.63661977236758134308; // 2/pi
 
-        const float denom = (x - x1);
-        float y;
+        const T denom = (x - x1);
+        T y;
 
-        if (std::fabs (denom) > 1.0e-8f)
+        if (std::fabs (denom) > (T) 1.0e-12)
         {
-            const float kx  = k * x;
-            const float kx1 = k * x1;
+            const T kx  = k * x;
+            const T kx1 = k * x1;
 
-            const float Fx  = x  * std::atan (kx)  - (0.5f / k) * std::log1p (kx  * kx);
-            const float Fx1 = x1 * std::atan (kx1) - (0.5f / k) * std::log1p (kx1 * kx1);
+            const T Fx  = x  * std::atan (kx)  - ((T) 0.5 / k) * std::log1p (kx  * kx);
+            const T Fx1 = x1 * std::atan (kx1) - ((T) 0.5 / k) * std::log1p (kx1 * kx1);
 
             y = (Fx - Fx1) / denom;
         }
@@ -833,121 +836,121 @@ private:
         }
 
         x1 = x;
-        return twoOverPi * y;
+        return (T) (twoOverPi) * y;
     }
 
-    static inline float lowLevelBlend (float x, float y, float knee) noexcept
+    template <typename T>
+    static inline T lowLevelBlendT (T x, T y, T knee) noexcept
     {
-        const float ax = std::fabs (x);
-        const float b  = ax / (ax + knee);
+        const T ax = std::fabs (x);
+        const T b  = ax / (ax + knee);
         return x + b * (y - x);
     }
 
-    static inline float asymTanhZero (float x, float k, float bias) noexcept
+    template <typename T>
+    static inline T asymTanhZeroT (T x, T k, T bias) noexcept
     {
-        const float y  = std::tanh (k * (x + bias)) - std::tanh (k * bias);
+        const T y  = std::tanh (k * (x + bias)) - std::tanh (k * bias);
 
-        const float yp = std::tanh (k * (1.0f + bias)) - std::tanh (k * bias);
-        const float yn = std::tanh (k * (-1.0f + bias)) - std::tanh (k * bias);
-        const float m  = 0.5f * (std::fabs (yp) + std::fabs (yn));
+        const T yp = std::tanh (k * ((T) 1 + bias)) - std::tanh (k * bias);
+        const T yn = std::tanh (k * ((T) -1 + bias)) - std::tanh (k * bias);
+        const T m  = (T) 0.5 * (std::fabs (yp) + std::fabs (yn));
 
-        return (m > 1.0e-12f) ? (y / m) : y;
+        return (m > (T) 1.0e-18) ? (y / m) : y;
     }
 
-    // ------------------ transformer HQ ------------------
-
-    static inline float transformerCoreADAA_HQ (float x, float& atan_x1, float env01, float sag01,
-                                                float driveBase, float biasBase) noexcept
+    // ------------------ transformer HQ (double path) ------------------
+    static inline Real transformerCoreADAA_HQ (Real x, Real& atan_x1, Real env01, Real sag01,
+                                               Real driveBase, Real biasBase) noexcept
     {
-        const float drive = (driveBase * (1.0f - 0.06f * sag01)) + 0.22f * env01;
-        const float bias  = (biasBase  + 0.018f * env01) + 0.010f * sag01;
+        const Real drive = (driveBase * (1.0 - 0.06 * sag01)) + 0.22 * env01;
+        const Real bias  = (biasBase  + 0.018 * env01) + 0.010 * sag01;
 
-        const float core  = adaaAtan1 (x, atan_x1, drive);
+        const Real core  = adaaAtan1T (x, atan_x1, drive);
 
-        const float x2 = x * x;
-        const float fluxIn = x + (0.12f + 0.05f * env01) * x * x2;
-        const float flux   = std::tanh ((1.15f + 0.10f * env01) * fluxIn);
+        const Real x2 = x * x;
+        const Real fluxIn = x + ((Real) 0.12 + (Real) 0.05 * env01) * x * x2;
+        const Real flux   = std::tanh (((Real) 1.15 + (Real) 0.10 * env01) * fluxIn);
 
-        const float k    = (1.70f + 0.95f * env01) * (1.0f - 0.05f * sag01);
-        const float asym = asymTanhZero (x, k, bias);
+        const Real k    = ((Real) 1.70 + (Real) 0.95 * env01) * (1.0 - (Real) 0.05 * sag01);
+        const Real asym = asymTanhZeroT (x, k, bias);
 
-        float y = 0.70f * core + 0.23f * flux + 0.07f * asym;
+        Real y = (Real) 0.70 * core + (Real) 0.23 * flux + (Real) 0.07 * asym;
 
-        y = lowLevelBlend (x, y, 0.18f);
+        y = lowLevelBlendT (x, y, (Real) 0.18);
 
-        return clampf (y, -1.25f, 1.25f);
+        return clampT (y, (Real) -1.25, (Real) 1.25);
     }
 
-    static inline float transformerHystADAA_HQ (float& m, float& prevX, float& atan_x1,
-                                                float x, float env01, float sag01, float sr,
-                                                float fcBase, float hystAmt,
-                                                float driveBase, float biasBase,
-                                                float injectBase) noexcept
+    static inline Real transformerHystADAA_HQ (Real& m, Real& prevX, Real& atan_x1,
+                                               Real x, Real env01, Real sag01, Real sr,
+                                               Real fcBase, Real hystAmt,
+                                               Real driveBase, Real biasBase,
+                                               Real injectBase) noexcept
     {
-        const float tau = 0.7f + 0.9f * (1.0f - env01);
-        const float leakAlpha = std::exp (-1.0f / (tau * (float) sr));
+        const Real tau = (Real) 0.7 + (Real) 0.9 * (1.0 - env01);
+        const Real leakAlpha = std::exp (-1.0 / (tau * sr));
         m *= leakAlpha;
 
-        const float dx = x - prevX;
+        const Real dx = x - prevX;
         prevX = x;
 
-        const float eddyAmt = (0.35f + 0.55f * env01);
-        const float eddy = 1.0f / (1.0f + eddyAmt * std::fabs (dx));
+        const Real eddyAmt = ((Real) 0.35 + (Real) 0.55 * env01);
+        const Real eddy = 1.0 / (1.0 + eddyAmt * std::fabs (dx));
 
-        const float fc = (fcBase + (40.0f * env01));
-        const float a  = alphaFromHz (fc, sr);
+        const Real fc = (fcBase + ((Real) 40.0 * env01));
+        const Real a  = alphaFromHzT (fc, sr);
 
-        const float d = (1.10f + 0.60f * env01) * (1.0f - 0.06f * sag01);
-        const float h = hystAmt + 0.12f * env01;
+        const Real d = ((Real) 1.10 + (Real) 0.60 * env01) * (1.0 - (Real) 0.06 * sag01);
+        const Real h = hystAmt + (Real) 0.12 * env01;
 
-        const float target = std::tanh (d * (x - h * m));
-        m = onePoleLP (m, target, a);
+        const Real target = std::tanh (d * (x - h * m));
+        m = onePoleLPT (m, target, a);
 
-        float inject = (injectBase + 0.10f * env01 + 0.05f * sag01);
+        Real inject = (injectBase + (Real) 0.10 * env01 + (Real) 0.05 * sag01);
         inject *= eddy;
 
-        const float xin = x + inject * m;
+        const Real xin = x + inject * m;
 
         return transformerCoreADAA_HQ (xin, atan_x1, env01, sag01, driveBase, biasBase);
     }
 
-    // ------------------ amp stages ------------------
-
-    static inline float ampStage1ADAA2 (State& s, float x, float env01, float sag01) noexcept
+    // ------------------ amp stages (double path) ------------------
+    static inline Real ampStage1ADAA2 (State& s, Real x, Real env01, Real sag01) noexcept
     {
-        const float drive = (1.55f + 0.58f * env01) * (1.0f - 0.08f * sag01);
-        const float k1    = (2.85f + 0.90f * env01) * (1.0f - 0.06f * sag01);
+        const Real drive = ((Real) 1.55 + (Real) 0.58 * env01) * (1.0 - (Real) 0.08 * sag01);
+        const Real k1    = ((Real) 2.85 + (Real) 0.90 * env01) * (1.0 - (Real) 0.06 * sag01);
 
-        // (opcional) bias por sag MUY sutil (ya tienes asimetría pro arriba)
-        const float bias = (0.0005f + 0.0009f * env01) * sag01;
+        const Real bias = ((Real) 0.0005 + (Real) 0.0009 * env01) * sag01;
 
-        const float pre = (x + bias) * drive;
+        const Real pre = (x + bias) * drive;
 
-        float y = adaaTanh2 (pre, s.amp1_x1, s.amp1_x2, k1);
+        Real y = adaaTanh2T (pre, s.amp1_x1, s.amp1_x2, k1);
 
-        y = lowLevelBlend (x, y, 0.26f);
+        y = lowLevelBlendT (x, y, (Real) 0.26);
 
-        return clampf (y, -1.35f, 1.35f);
+        return clampT (y, (Real) -1.35, (Real) 1.35);
     }
 
-    static inline float ampStage2ADAA (State& s, float x, float env01, float sag01) noexcept
+    static inline Real ampStage2ADAA (State& s, Real x, Real env01, Real sag01) noexcept
     {
-        const float drive = (1.10f + 0.34f * env01) * (1.0f - 0.06f * sag01);
-        const float k2    = (2.05f + 0.78f * env01) * (1.0f - 0.05f * sag01);
+        const Real drive = ((Real) 1.10 + (Real) 0.34 * env01) * (1.0 - (Real) 0.06 * sag01);
+        const Real k2    = ((Real) 2.05 + (Real) 0.78 * env01) * (1.0 - (Real) 0.05 * sag01);
 
-        const float pre = x * drive;
+        const Real pre = x * drive;
 
-        float y = adaaTanh1 (pre, s.amp2_x1, k2);
+        Real y = adaaTanh1T (pre, s.amp2_x1, k2);
 
-        const float t = pre;
-        y += (0.004f + 0.014f * env01) * (t * t * t);
+        const Real t = pre;
+        y += ((Real) 0.004 + (Real) 0.014 * env01) * (t * t * t);
 
-        y = 0.88f * y + 0.12f * (0.63661977236758134308f * std::atan (2.3f * y)); // 2/pi
+        y = (Real) 0.88 * y + (Real) 0.12 * ((Real) 0.63661977236758134308 * std::atan ((Real) 2.3 * y)); // 2/pi
 
-        y = lowLevelBlend (x, y, 0.24f);
+        y = lowLevelBlendT (x, y, (Real) 0.24);
 
-        return clampf (y, -1.35f, 1.35f);
+        return clampT (y, (Real) -1.35, (Real) 1.35);
     }
 };
+
 
 
