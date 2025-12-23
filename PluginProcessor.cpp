@@ -228,7 +228,6 @@ static std::pair<int, int> inferSpriteGrid (const juce::Image& sheet, int totalF
 
 }} // namespace plugin::ui
 
-
 //==============================================================================
 // Parameters
 static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
@@ -249,6 +248,16 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
         "mix", "Mix",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.0001f),
         1.0f));
+
+    // ✅ NUEVO: AutoGain ON/OFF (default ON)
+    params.push_back (std::make_unique<juce::AudioParameterBool>(
+        "autogain", "AutoGain", true));
+
+    // ✅ NUEVO: Output (dB) para uso manual cuando AutoGain está OFF
+    params.push_back (std::make_unique<juce::AudioParameterFloat>(
+        "output", "Output",
+        juce::NormalisableRange<float> (-24.0f, 24.0f, 0.01f),
+        0.0f));
 
     juce::StringArray preampChoices;
     for (const auto& it : PresetRegistry::items)
@@ -511,19 +520,23 @@ private:
 };
 
 //------------------------------------------------------------------------------
-class MinimalEditor final : public juce::AudioProcessorEditor
+class MinimalEditor final : public juce::AudioProcessorEditor,
+                            private juce::Timer
 {
 public:
     explicit MinimalEditor (YourPluginAudioProcessor& proc)
         : juce::AudioProcessorEditor (&proc)
         , processor (proc)
-        , driveKnob ("Drive")
-        , toneKnob  ("Tone")
-        , mixKnob   ("Mix")
+        , driveKnob  ("Drive")
+        , toneKnob   ("Tone")
+        , mixKnob    ("Mix")
+        , outputKnob ("Output") // ✅ NUEVO
     {
+        // Look & Feel knobs
         driveKnob.slider.setLookAndFeel (&knobLNF);
         toneKnob .slider.setLookAndFeel (&knobLNF);
         mixKnob  .slider.setLookAndFeel (&knobLNF);
+        outputKnob.slider.setLookAndFeel (&knobLNF);
 
         driveKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF006700"));
         driveKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FF65FF65"));
@@ -534,17 +547,25 @@ public:
         mixKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF555555"));
         mixKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF"));
 
+        // Output knob (paleta neutra)
+        outputKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF3A3A3A"));
+        outputKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFD0D0D0"));
+
+        // Fonts/labels
         driveKnob.label.setFont (juce::Font (11.0f));
         toneKnob .label.setFont (juce::Font (11.0f));
         mixKnob  .label.setFont (juce::Font (11.0f));
+        outputKnob.label.setFont (juce::Font (11.0f));
 
         driveKnob.label.setLookAndFeel (&knobLNF);
         toneKnob .label.setLookAndFeel (&knobLNF);
         mixKnob  .label.setLookAndFeel (&knobLNF);
+        outputKnob.label.setLookAndFeel (&knobLNF);
 
         addAndMakeVisible (driveKnob);
         addAndMakeVisible (toneKnob);
         addAndMakeVisible (mixKnob);
+        addAndMakeVisible (outputKnob); // ✅ NUEVO
 
         addAndMakeVisible (header);
 
@@ -571,8 +592,12 @@ public:
         driveKnob.setLabelSlotHeights (12, 14);
         mixKnob  .setLabelSlotHeights (12, 14);
         toneKnob .setLabelSlotHeights (20, 14);
+
+        // Output: sin asset, usa texto
+        outputKnob.setLabelSlotHeights (12, 14);
        #endif
 
+        // Preamp
         preampBox.setJustificationType (juce::Justification::centredLeft);
         preampBox.setLookAndFeel (&knobLNF);
 
@@ -585,6 +610,7 @@ public:
 
         addAndMakeVisible (preampBox);
 
+        // Oversampling
         osBox.setJustificationType (juce::Justification::centredLeft);
         osBox.setLookAndFeel (&knobLNF);
         osBox.addItem ("x1", 1);
@@ -593,31 +619,47 @@ public:
         osBox.addItem ("x8", 4);
         addAndMakeVisible (osBox);
 
-        using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
-        using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+        // ✅ AutoGain button
+        autoGainButton.setButtonText ("AutoGain");
+        addAndMakeVisible (autoGainButton);
 
-        driveAtt  = std::make_unique<SliderAttachment>   (processor.apvts, "drive",  driveKnob.slider);
-        toneAtt   = std::make_unique<SliderAttachment>   (processor.apvts, "tone",   toneKnob.slider);
-        mixAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
-        preampAtt = std::make_unique<ComboBoxAttachment> (processor.apvts, "preamp", preampBox);
-        osAtt     = std::make_unique<ComboBoxAttachment> (processor.apvts, "os",     osBox);
+        // Attachments
+        driveAtt   = std::make_unique<SliderAttachment>   (processor.apvts, "drive",  driveKnob.slider);
+        toneAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "tone",   toneKnob.slider);
+        mixAtt     = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
+        outputAtt  = std::make_unique<SliderAttachment>   (processor.apvts, "output", outputKnob.slider);
+
+        preampAtt  = std::make_unique<ComboBoxAttachment> (processor.apvts, "preamp", preampBox);
+        osAtt      = std::make_unique<ComboBoxAttachment> (processor.apvts, "os",     osBox);
+
+        autoGainAtt = std::make_unique<ButtonAttachment>  (processor.apvts, "autogain", autoGainButton);
+
+        // Cache param ptr para enable/disable del output knob
+        autoGainParam = processor.apvts.getRawParameterValue ("autogain");
+
+        startTimerHz (30);
+        timerCallback(); // aplica estado inicial
 
         setSize (820, 460);
     }
 
     ~MinimalEditor() override
     {
+        stopTimer();
         header.stop();
 
         preampBox.setLookAndFeel (nullptr);
         osBox.setLookAndFeel (nullptr);
+
         driveKnob.label.setLookAndFeel (nullptr);
         toneKnob .label.setLookAndFeel (nullptr);
         mixKnob  .label.setLookAndFeel (nullptr);
+        outputKnob.label.setLookAndFeel (nullptr);
 
         driveKnob.slider.setLookAndFeel (nullptr);
         toneKnob .slider.setLookAndFeel (nullptr);
         mixKnob  .slider.setLookAndFeel (nullptr);
+        outputKnob.slider.setLookAndFeel (nullptr);
     }
 
     void paint (juce::Graphics& g) override
@@ -651,11 +693,16 @@ public:
         const int startX = area.getX();
         const int y      = area.getY();
 
-        driveKnob.setBounds (startX,                         y, knobW, knobH);
-        toneKnob .setBounds (startX + knobW + gap,           y, knobW, knobH);
-        mixKnob  .setBounds (startX + (knobW + gap) * 2,     y, knobW, knobH);
+        driveKnob .setBounds (startX,                         y, knobW, knobH);
+        toneKnob  .setBounds (startX + (knobW + gap) * 1,     y, knobW, knobH);
+        mixKnob   .setBounds (startX + (knobW + gap) * 2,     y, knobW, knobH);
+        outputKnob.setBounds (startX + (knobW + gap) * 3,     y, knobW, knobH); // ✅ NUEVO: a la derecha de Mix
 
         bottom.reduce (0, 10);
+
+        // ✅ AutoGain button a la derecha
+        auto agArea = bottom.removeFromRight (120);
+        autoGainButton.setBounds (agArea.reduced (0, 12));
 
         auto osArea = bottom.removeFromLeft (juce::jmax (120, bottom.getWidth() / 3));
         osBox.setBounds (osArea.reduced (0, 12));
@@ -663,6 +710,19 @@ public:
     }
 
 private:
+    void timerCallback() override
+    {
+        const bool agOn = (autoGainParam != nullptr && autoGainParam->load() >= 0.5f);
+
+        outputKnob.setEnabled (!agOn);
+        outputKnob.setAlpha (agOn ? 0.35f : 1.0f);
+    }
+
+private:
+    using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ComboBoxAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using ButtonAttachment   = juce::AudioProcessorValueTreeState::ButtonAttachment;
+
     YourPluginAudioProcessor& processor;
 
     KnobLNF knobLNF;
@@ -672,12 +732,18 @@ private:
     plugin::ui::LabeledKnob driveKnob;
     plugin::ui::LabeledKnob toneKnob;
     plugin::ui::LabeledKnob mixKnob;
+    plugin::ui::LabeledKnob outputKnob; // ✅ NUEVO
+
+    juce::ToggleButton autoGainButton;   // ✅ NUEVO
 
     juce::ComboBox preampBox;
     juce::ComboBox osBox;
 
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> driveAtt, toneAtt, mixAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> preampAtt, osAtt;
+    std::unique_ptr<SliderAttachment> driveAtt, toneAtt, mixAtt, outputAtt;
+    std::unique_ptr<ComboBoxAttachment> preampAtt, osAtt;
+    std::unique_ptr<ButtonAttachment> autoGainAtt;
+
+    std::atomic<float>* autoGainParam = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MinimalEditor)
 };
@@ -696,6 +762,10 @@ YourPluginAudioProcessor::YourPluginAudioProcessor()
     pMix    = apvts.getRawParameterValue ("mix");
     pPreamp = apvts.getRawParameterValue ("preamp");
     pOS     = apvts.getRawParameterValue ("os");
+
+    // ✅ NUEVO
+    pAutoGain = apvts.getRawParameterValue ("autogain");
+    pOutputDb = apvts.getRawParameterValue ("output");
 
 #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
     static std::once_flag sFontOnce;
@@ -761,7 +831,7 @@ void YourPluginAudioProcessor::setStateInformation (const void* data, int sizeIn
 }
 
 //==============================================================================
-// Tilt
+// Tilt (legacy setter directo)
 void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
 {
     const float t = juce::jlimit (0.0f, 1.0f, tone01);
@@ -799,6 +869,106 @@ void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
     *lowShelfR.coefficients  = *low;
     *highShelfL.coefficients = *high;
     *highShelfR.coefficients = *high;
+}
+
+//==============================================================================
+// ✅ Tone sin clicks: helpers rampa/interpolación de coeficientes
+
+void YourPluginAudioProcessor::calcTiltCoeffArrays (float tone01,
+                                                    std::array<float, 6>& low,
+                                                    std::array<float, 6>& high)
+{
+    const float t = juce::jlimit (0.0f, 1.0f, tone01);
+    const float tiltDb = plugin::mapToneTiltDb (t);
+
+    const float mag01 = juce::jlimit (0.0f, 1.0f, std::abs (tiltDb) / 9.0f);
+
+    const float fcLowBase  = 240.0f;
+    const float fcHighBase = 3200.0f;
+
+    float fcLow  = fcLowBase;
+    float fcHigh = fcHighBase;
+
+    if (tiltDb < 0.0f) // dark
+    {
+        fcHigh = fcHighBase * (1.0f - 0.35f * mag01);
+        fcLow  = fcLowBase  * (1.0f + 0.20f * mag01);
+    }
+    else if (tiltDb > 0.0f) // bright
+    {
+        fcHigh = fcHighBase * (1.0f + 0.55f * mag01);
+        fcLow  = fcLowBase  * (1.0f - 0.15f * mag01);
+    }
+
+    fcLow  = juce::jlimit (90.0f,   650.0f,  fcLow);
+    fcHigh = juce::jlimit (1200.0f, 8000.0f, fcHigh);
+
+    constexpr float q = 0.707f;
+
+    auto lowC  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (
+        sr, fcLow, q, juce::Decibels::decibelsToGain (-tiltDb));
+
+    auto highC = juce::dsp::IIR::Coefficients<float>::makeHighShelf (
+        sr, fcHigh, q, juce::Decibels::decibelsToGain ( tiltDb));
+
+    for (int i = 0; i < 6; ++i)
+    {
+        low [(size_t) i] = lowC ->coefficients[(size_t) i];
+        high[(size_t) i] = highC->coefficients[(size_t) i];
+    }
+}
+
+void YourPluginAudioProcessor::beginTiltRamp (float tone01, int rampSamples)
+{
+    const int N = juce::jmax (1, rampSamples);
+
+    calcTiltCoeffArrays (tone01, tiltLowTgt, tiltHighTgt);
+
+    for (int i = 0; i < 6; ++i)
+    {
+        tiltLowStep [(size_t) i]  = (tiltLowTgt [(size_t) i]  - tiltLowCur [(size_t) i])  / (float) N;
+        tiltHighStep[(size_t) i]  = (tiltHighTgt[(size_t) i]  - tiltHighCur[(size_t) i])  / (float) N;
+    }
+
+    tiltRampRemaining = N;
+}
+
+inline void YourPluginAudioProcessor::tickTiltRamp() noexcept
+{
+    if (tiltRampRemaining <= 0)
+        return;
+
+    for (int i = 0; i < 6; ++i)
+    {
+        tiltLowCur [(size_t) i]  += tiltLowStep [(size_t) i];
+        tiltHighCur[(size_t) i]  += tiltHighStep[(size_t) i];
+    }
+
+    --tiltRampRemaining;
+
+    if (tiltRampRemaining == 0)
+    {
+        // “snap” final para evitar drift por floating error
+        tiltLowCur  = tiltLowTgt;
+        tiltHighCur = tiltHighTgt;
+    }
+
+    // Escribir coeficientes (L/R iguales)
+    if (lowShelfL.coefficients != nullptr)
+        for (int i = 0; i < 6; ++i)
+            lowShelfL.coefficients->coefficients[(size_t) i] = tiltLowCur[(size_t) i];
+
+    if (lowShelfR.coefficients != nullptr)
+        for (int i = 0; i < 6; ++i)
+            lowShelfR.coefficients->coefficients[(size_t) i] = tiltLowCur[(size_t) i];
+
+    if (highShelfL.coefficients != nullptr)
+        for (int i = 0; i < 6; ++i)
+            highShelfL.coefficients->coefficients[(size_t) i] = tiltHighCur[(size_t) i];
+
+    if (highShelfR.coefficients != nullptr)
+        for (int i = 0; i < 6; ++i)
+            highShelfR.coefficients->coefficients[(size_t) i] = tiltHighCur[(size_t) i];
 }
 
 //==============================================================================
@@ -889,16 +1059,40 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
 
-    driveSm.setCurrentAndTargetValue (*pDrive);
-    toneSm .setCurrentAndTargetValue (*pTone);
-    mixSm  .setCurrentAndTargetValue (*pMix);
+    driveSm.setCurrentAndTargetValue (pDrive ? pDrive->load() : 0.25f);
+    toneSm .setCurrentAndTargetValue (pTone  ? pTone ->load() : 0.5f);
+    mixSm  .setCurrentAndTargetValue (pMix   ? pMix  ->load() : 1.0f);
+
+    // ✅ NUEVO: Output gain + blend autogain
+    outputGainSm.reset (sr, 0.02);
+    outputGainSm.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (pOutputDb ? pOutputDb->load() : 0.0f));
+
+    autoGainBlendSm.reset (sr, 0.01);
+    const bool agOn = (pAutoGain != nullptr && pAutoGain->load() >= 0.5f);
+    autoGainBlendSm.setCurrentAndTargetValue (agOn ? 1.0f : 0.0f);
 
     lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     lowShelfR.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
     highShelfR.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
 
-    updateTiltCoeffs (*pTone);
+    updateTiltCoeffs (pTone ? pTone->load() : 0.5f);
+
+    // ✅ Inicializar arrays de coef para ramp
+    auto read6 = [] (const juce::dsp::IIR::Coefficients<float>& c, std::array<float, 6>& dst)
+    {
+        for (int i = 0; i < 6; ++i)
+            dst[(size_t) i] = c.coefficients[(size_t) i];
+    };
+
+    if (lowShelfL.coefficients != nullptr)  read6 (*lowShelfL.coefficients,  tiltLowCur);
+    if (highShelfL.coefficients != nullptr) read6 (*highShelfL.coefficients, tiltHighCur);
+
+    tiltLowTgt = tiltLowCur;
+    tiltHighTgt = tiltHighCur;
+    tiltLowStep.fill (0.0f);
+    tiltHighStep.fill (0.0f);
+    tiltRampRemaining = 0;
 
     autoGain.prepare (sr);
 
@@ -965,7 +1159,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     int preampIndex = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                    (int) std::lround (*pPreamp));
+                                    (int) std::lround (pPreamp->load()));
 
     if (PresetRegistry::items.size() > 0)
     {
@@ -1152,7 +1346,7 @@ void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int w
 }
 
 // Inicia transición: construye preset/OS destino en el banco INACTIVO (pending*)
-void YourPluginAudioProcessor::beginTransition (int newPreset, int newOS, int wetCh, int numSamples)
+void YourPluginAudioProcessor::beginTransition (int newPreset, int newOS, int wetCh, int /*numSamples*/)
 {
     if (transitioning)
         return;
@@ -1329,15 +1523,23 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* ch0 = buffer.getWritePointer (0);
     auto* ch1 = (numCh > 1) ? buffer.getWritePointer (1) : nullptr;
 
-    driveSm.setTargetValue (*pDrive);
-    toneSm .setTargetValue (*pTone);
-    mixSm  .setTargetValue (*pMix);
+    // targets de smoothers
+    driveSm.setTargetValue (pDrive ? pDrive->load() : 0.25f);
+    toneSm .setTargetValue (pTone  ? pTone ->load() : 0.5f);
+    mixSm  .setTargetValue (pMix   ? pMix  ->load() : 1.0f);
+
+    // ✅ AutoGain ON/OFF + Output targets
+    const bool agOn = (pAutoGain != nullptr && pAutoGain->load() >= 0.5f);
+    autoGainBlendSm.setTargetValue (agOn ? 1.0f : 0.0f);
+
+    const float outDb = (pOutputDb != nullptr ? pOutputDb->load() : 0.0f);
+    outputGainSm.setTargetValue (juce::Decibels::decibelsToGain (outDb));
 
     // Selección de preset deseado
     int desiredPreset = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
         desiredPreset = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                      (int) std::lround (*pPreamp));
+                                      (int) std::lround (pPreamp->load()));
 
     // OS deseado
     const int desiredOS = getDesiredOversamplingIndex();
@@ -1356,45 +1558,44 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // -------------------------------------------------------------------------
-    // 0) Tone smoothing + tilt (SUB-BLOQUES)
-    constexpr int kTiltUpdateStride = 32;
-
+    // 0) Tone smoothing + tilt SIN clicks (rampa por coef, stride=32)
     if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < numSamples)
         wetBuffer.setSize (wetCh, numSamples, false, false, true);
 
     auto* wetL = wetBuffer.getWritePointer (0);
     auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
-    int i0 = 0;
-    while (i0 < numSamples)
+    int strideLeft = 0;
+
+    for (int i = 0; i < numSamples; ++i)
     {
-        const int chunk = juce::jmin (kTiltUpdateStride, numSamples - i0);
+        const float toneVal = toneSm.getNextValue();
 
-        updateTiltCoeffs (toneSm.getCurrentValue());
-
-        for (int k = 0; k < chunk; ++k)
+        if (strideLeft <= 0)
         {
-            const int i = i0 + k;
-
-            const float drive01 = driveSm.getNextValue();
-            const float pregain = juce::Decibels::decibelsToGain (plugin::mapDriveDb (drive01));
-
-            float xL = ch0[i] * pregain;
-            xL = lowShelfL.processSample (xL);
-            xL = highShelfL.processSample (xL);
-            wetL[i] = xL;
-
-            if (wetR != nullptr && ch1 != nullptr)
-            {
-                float xR = ch1[i] * pregain;
-                xR = lowShelfR.processSample (xR);
-                xR = highShelfR.processSample (xR);
-                wetR[i] = xR;
-            }
+            const int rampN = juce::jmin (kTiltUpdateStride, numSamples - i);
+            beginTiltRamp (toneVal, rampN);
+            strideLeft = kTiltUpdateStride;
         }
 
-        toneSm.skip (chunk);
-        i0 += chunk;
+        tickTiltRamp();
+        --strideLeft;
+
+        const float drive01 = driveSm.getNextValue();
+        const float pregain = juce::Decibels::decibelsToGain (plugin::mapDriveDb (drive01));
+
+        float xL = ch0[i] * pregain;
+        xL = lowShelfL.processSample (xL);
+        xL = highShelfL.processSample (xL);
+        wetL[i] = xL;
+
+        if (wetR != nullptr && ch1 != nullptr)
+        {
+            float xR = ch1[i] * pregain;
+            xR = lowShelfR.processSample (xR);
+            xR = highShelfR.processSample (xR);
+            wetR[i] = xR;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1461,11 +1662,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
                 const size_t osCh = osBlockA.getNumChannels();
 
                 // osTemp: copia exacta del osBlockA (antes de procesar)
-                if ((int) osCh <= 0)
-                {
-                    // nada
-                }
-                else
+                if ((int) osCh > 0)
                 {
                     if (osTemp.getNumChannels() != (int) osCh || osTemp.getNumSamples() < (int) osSamples)
                         osTemp.setSize ((int) osCh, (int) osSamples, false, false, true);
@@ -1494,7 +1691,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
                             stereoA.processSample (L[n], R[n]); // ✅
                         }
                     }
-                    else
+                    else if (osCh >= 1)
                     {
                         float* data = osBlockA.getChannelPointer (0);
                         void* st = (void*) &getActiveStateStorage (0);
@@ -1525,7 +1722,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
                             stereoB.processSample (Lb[n], Rb[n]); // ✅
                         }
                     }
-                    else
+                    else if (osCh >= 1)
                     {
                         float* data = osTemp.getWritePointer (0);
                         void* st = (void*) &getPendingStateStorage (0);
@@ -1624,7 +1821,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // -------------------------------------------------------------------------
-    // 3) Mix + AUTO-LEVEL (por muestra)
+    // 3) Mix + AUTO-LEVEL (por muestra) + Output manual cuando AutoGain OFF
     const float safetyHeadroom = juce::Decibels::decibelsToGain (-0.9f);
     const float maxAutoGain    = juce::Decibels::decibelsToGain (+12.0f);
 
@@ -1633,9 +1830,13 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const int size = dryDelayBuffer.getNumSamples();
 
+    constexpr float epsBlend = 1.0e-5f;
+
     for (int i = 0; i < numSamples; ++i)
     {
-        const float mix01 = mixSm.getNextValue();
+        const float mix01  = mixSm.getNextValue();
+        const float blend  = autoGainBlendSm.getNextValue();  // 0..1
+        const float gManual = outputGainSm.getNextValue();    // lineal
 
         const int wp = dryDelayWritePos;
         int rp = wp - dryDelaySamples;
@@ -1656,25 +1857,62 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float wetOutL = wetL[i];
         const float wetOutR = (wetR != nullptr) ? wetR[i] : wetOutL;
 
+        const bool useAuto = (blend > epsBlend);
+
+        // Si mix ~ 0, la entrada útil es dry
         if (mix01 <= 1.0e-4f)
         {
-            (void) autoGain.processStereo (dryL, dryR, dryL, dryR);
-            ch0[i] = dryL;
+            float gAuto = 1.0f;
+            if (useAuto)
+            {
+                gAuto = autoGain.processStereo (dryL, dryR, dryL, dryR);
+                gAuto = juce::jlimit (0.0f, maxAutoGain, gAuto);
+            }
+
+            const float gFinal = blend * gAuto + (1.0f - blend) * gManual;
+            const float head   = (1.0f - blend) + blend * safetyHeadroom;
+
+            float outL = dryL * gFinal * head;
+            float outR = dryR * gFinal * head;
+
+            if (useAuto)
+            {
+                outL = plugin::softClipSafety (outL);
+                outR = plugin::softClipSafety (outR);
+            }
+
+            ch0[i] = outL;
             if (ch1 != nullptr)
-                ch1[i] = dryR;
+                ch1[i] = outR;
+
             continue;
         }
 
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        const float g = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
+        float gAuto = 1.0f;
+        if (useAuto)
+        {
+            gAuto = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
+            gAuto = juce::jlimit (0.0f, maxAutoGain, gAuto);
+        }
 
-        const float gSafe = juce::jlimit (0.0f, maxAutoGain, g);
+        const float gFinal = blend * gAuto + (1.0f - blend) * gManual;
+        const float head   = (1.0f - blend) + blend * safetyHeadroom;
 
-        ch0[i] = plugin::softClipSafety (mixedL * gSafe * safetyHeadroom);
+        float outL = mixedL * gFinal * head;
+        float outR = mixedR * gFinal * head;
+
+        if (useAuto)
+        {
+            outL = plugin::softClipSafety (outL);
+            outR = plugin::softClipSafety (outR);
+        }
+
+        ch0[i] = outL;
         if (ch1 != nullptr)
-            ch1[i] = plugin::softClipSafety (mixedR * gSafe * safetyHeadroom);
+            ch1[i] = outR;
     }
 }
 
@@ -1684,5 +1922,7 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
+
 
 
