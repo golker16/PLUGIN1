@@ -297,26 +297,16 @@ public:
         // Rango amplio para que realmente compense presets/drive agresivos
         setClampDb (-60.0f, +24.0f);
 
-        // ✅ Ajustes "full tiempo real" (más reactivo):
-        // - gate más bajo para no "esperar" a que el RMS suba
-        // - ventana de medición mucho más corta (el 'momento' que sentías venía de aquí)
-        // - smoothing de ganancia rápido (sube/baja en pocos ms)
-        //
-        // Nota: estos valores son deliberadamente agresivos.
-        // Si llegas a oír bombeo en material muy dinámico, sube measurementWindowMs
-        // a 20–40ms y/o releaseMs a 10–30ms.
+        // ✅ Ajustes "full tiempo real" (más reactivo)
         setGateDb  (-90.0f);
 
-        // Ventana de medición (RMS EMA).
-        // 12ms ≈ comportamiento prácticamente instantáneo sin depender del tamaño de bloque.
+        // Ventana de medición (RMS EMA)
         setMeasurementWindowMs (12.0f);
 
-        // Suavizado de la GANANCIA (no de la medición):
-        // attack: baja rápido cuando el preset/drive sube nivel
-        // release: sube rápido para mantener el nivel constante
+        // Suavizado de la GANANCIA (no de la medición)
         setGainSmoothingMs (0.30f, 6.0f);
 
-        // Vuelve a unity en silencio (más rápido, evita quedarse "pegado")
+        // Vuelve a unity en silencio
         setReturnToUnityMs (220.0f);
 
         // HP para no dejar que DC/subgrave dicte el autogain
@@ -327,19 +317,11 @@ public:
 
     void reset()
     {
-        // Compat (mono/antiguo)
-        inEnv  = 0.0f;
-        outEnv = 0.0f;
+        inEnv[0] = inEnv[1] = 0.0f;
+        outEnv[0] = outEnv[1] = 0.0f;
 
-        compGain   = 1.0f;
-        targetGain = 1.0f;
-
-        // ✅ Estéreo robusto (por canal)
-        inEnvCh[0] = inEnvCh[1] = 0.0f;
-        outEnvCh[0] = outEnvCh[1] = 0.0f;
-
-        compGainCh[0] = compGainCh[1] = 1.0f;
-        targetGainCh[0] = targetGainCh[1] = 1.0f;
+        compGain[0] = compGain[1] = 1.0f;
+        targetGain[0] = targetGain[1] = 1.0f;
 
         in_hp_x1[0] = in_hp_x1[1] = 0.0f;
         in_hp_y1[0] = in_hp_y1[1] = 0.0f;
@@ -347,65 +329,67 @@ public:
         out_hp_y1[0] = out_hp_y1[1] = 0.0f;
     }
 
-    float getGain() const noexcept { return compGain; }
+    // Promedio (útil para debug/meters sin romper nada)
+    float getGain() const noexcept { return 0.5f * (compGain[0] + compGain[1]); }
+    float getGainL() const noexcept { return compGain[0]; }
+    float getGainR() const noexcept { return compGain[1]; }
 
-    // Procesa una muestra estéreo y devuelve la ganancia ACTUAL (ya suavizada)
-// (compatibilidad: devuelve el promedio de ambas ganancias)
+    // ✅ PRO: AutoGain por canal (L/R independientes) para respetar la distribución del input.
+    // La medición de salida debe ser PRE-compGain (para evitar auto-cancelación).
+    inline void processStereo (float dryL, float dryR, float outLpre, float outRpre,
+                               float& gL, float& gR) noexcept
+    {
+        // Medición HP por canal
+        const float inL  = measureHP (dryL,    0, in_hp_x1,  in_hp_y1);
+        const float inR  = measureHP (dryR,    1, in_hp_x1,  in_hp_y1);
+        const float outL = measureHP (outLpre, 0, out_hp_x1, out_hp_y1);
+        const float outR = measureHP (outRpre, 1, out_hp_x1, out_hp_y1);
+
+        // Potencia por canal (no promedio)
+        const float pInL  = inL  * inL;
+        const float pInR  = inR  * inR;
+        const float pOutL = outL * outL;
+        const float pOutR = outR * outR;
+
+        // RMS envs por canal
+        inEnv[0]  = measAlpha * inEnv[0]  + (1.0f - measAlpha) * pInL;
+        inEnv[1]  = measAlpha * inEnv[1]  + (1.0f - measAlpha) * pInR;
+        outEnv[0] = measAlpha * outEnv[0] + (1.0f - measAlpha) * pOutL;
+        outEnv[1] = measAlpha * outEnv[1] + (1.0f - measAlpha) * pOutR;
+
+        // Ganancia por canal
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const bool gateOk = (inEnv[ch] > gatePow) && (outEnv[ch] > gatePow);
+
+            if (gateOk)
+            {
+                const float ratio = inEnv[ch] / (outEnv[ch] + 1.0e-20f);
+                float g = std::sqrt (ratio);
+                g = juce::jlimit (minGain, maxGain, g);
+                targetGain[ch] = g;
+            }
+            else
+            {
+                // vuelve a unity cuando no hay señal útil
+                targetGain[ch] = returnAlpha * targetGain[ch] + (1.0f - returnAlpha) * 1.0f;
+            }
+
+            const bool needDown = (targetGain[ch] < compGain[ch]);
+            const float a = needDown ? gainAttackAlpha : gainReleaseAlpha;
+            compGain[ch] = a * compGain[ch] + (1.0f - a) * targetGain[ch];
+        }
+
+        gL = compGain[0];
+        gR = compGain[1];
+    }
+
+    // Compat: mantiene la firma vieja (devuelve promedio)
     inline float processStereo (float dryL, float dryR, float outLpre, float outRpre) noexcept
     {
-    float gL = 1.0f, gR = 1.0f;
-    processStereoIndependent (dryL, dryR, outLpre, outRpre, gL, gR);
-    return 0.5f * (gL + gR);
-    }
-
-    // ✅ Estéreo robusto: procesa cada lado de forma independiente
-    inline void processStereoIndependent (float dryL, float dryR, float outLpre, float outRpre,
-                                     float& gainL, float& gainR) noexcept
-    {
-    const float inL  = measureHP (dryL,    0, in_hp_x1,  in_hp_y1);
-    const float inR  = measureHP (dryR,    1, in_hp_x1,  in_hp_y1);
-    const float outL = measureHP (outLpre, 0, out_hp_x1, out_hp_y1);
-    const float outR = measureHP (outRpre, 1, out_hp_x1, out_hp_y1);
-
-    const float pInL  = inL  * inL;
-    const float pInR  = inR  * inR;
-    const float pOutL = outL * outL;
-    const float pOutR = outR * outR;
-
-    // RMS envs por canal
-    inEnvCh[0]  = measAlpha * inEnvCh[0]  + (1.0f - measAlpha) * pInL;
-    inEnvCh[1]  = measAlpha * inEnvCh[1]  + (1.0f - measAlpha) * pInR;
-    outEnvCh[0] = measAlpha * outEnvCh[0] + (1.0f - measAlpha) * pOutL;
-    outEnvCh[1] = measAlpha * outEnvCh[1] + (1.0f - measAlpha) * pOutR;
-
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        const bool gateOk = (inEnvCh[ch] > gatePow) && (outEnvCh[ch] > gatePow);
-
-        if (gateOk)
-        {
-            const float ratio = inEnvCh[ch] / (outEnvCh[ch] + 1.0e-20f);
-            float g = std::sqrt (ratio);
-            g = juce::jlimit (minGain, maxGain, g);
-            targetGainCh[ch] = g;
-        }
-        else
-        {
-            // vuelve a unity cuando no hay señal útil
-            targetGainCh[ch] = returnAlpha * targetGainCh[ch] + (1.0f - returnAlpha) * 1.0f;
-        }
-
-        const bool needDown = (targetGainCh[ch] < compGainCh[ch]);
-        const float a = needDown ? gainAttackAlpha : gainReleaseAlpha;
-        compGainCh[ch] = a * compGainCh[ch] + (1.0f - a) * targetGainCh[ch];
-    }
-
-    gainL = compGainCh[0];
-    gainR = compGainCh[1];
-
-    // compat: valor "general" (por si alguien lo usa)
-    compGain   = 0.5f * (gainL + gainR);
-    targetGain = 0.5f * (targetGainCh[0] + targetGainCh[1]);
+        float gL = 1.0f, gR = 1.0f;
+        processStereo (dryL, dryR, outLpre, outRpre, gL, gR);
+        return 0.5f * (gL + gR);
     }
 
     // --- ajustes ---
@@ -451,44 +435,40 @@ private:
         return std::exp (-1.0f / (tau * (float) sr));
     }
 
-    inline float measureHP (float x, int ch, float* x1, float* y1) noexcept
+    inline float measureHP (float x, int ch, float* hpX1, float* hpY1) noexcept
     {
-        // 1-pole HP: y[n] = a*(y[n-1] + x[n] - x[n-1])
-        const float y = hpA * (y1[ch] + x - x1[ch]);
-        x1[ch] = x;
-        y1[ch] = y;
+        // 1-pole HP: y = a*(y1 + x - x1)
+        const float y = hpA * (hpY1[ch] + x - hpX1[ch]);
+        hpX1[ch] = x;
+        hpY1[ch] = y;
         return y;
     }
 
     double sr = 48000.0;
 
-    float minGain = juce::Decibels::decibelsToGain (-60.0f);
-    float maxGain = juce::Decibels::decibelsToGain (+24.0f);
+    float measAlpha = 0.999f;
+    float gatePow = 1.0e-12f;
 
-    float gatePow = juce::Decibels::decibelsToGain (-80.0f) * juce::Decibels::decibelsToGain (-80.0f);
+    float minGain = juce::Decibels::decibelsToGain (-18.0f);
+    float maxGain = juce::Decibels::decibelsToGain (+18.0f);
+
+    float gainAttackAlpha  = 0.999f;
+    float gainReleaseAlpha = 0.9995f;
+
+    float returnAlpha = 0.9999f;
 
     float hpA = 0.98f;
+
     float in_hp_x1[2]  = { 0.0f, 0.0f };
     float in_hp_y1[2]  = { 0.0f, 0.0f };
     float out_hp_x1[2] = { 0.0f, 0.0f };
     float out_hp_y1[2] = { 0.0f, 0.0f };
 
-    float measAlpha = 0.999f;
-    float inEnv  = 0.0f;
-    float outEnv = 0.0f;
+    float inEnv[2]  = { 0.0f, 0.0f };
+    float outEnv[2] = { 0.0f, 0.0f };
 
-    // ✅ Estéreo robusto (RMS + ganancia por canal)
-    float inEnvCh[2]  = { 0.0f, 0.0f };
-    float outEnvCh[2] = { 0.0f, 0.0f };
-
-    float compGainCh[2]   = { 1.0f, 1.0f };
-    float targetGainCh[2] = { 1.0f, 1.0f };
-    float gainAttackAlpha  = 0.99f;
-    float gainReleaseAlpha = 0.9995f;
-    float returnAlpha      = 0.9999f;
-
-    float compGain   = 1.0f;
-    float targetGain = 1.0f;
+    float compGain[2]   = { 1.0f, 1.0f };
+    float targetGain[2] = { 1.0f, 1.0f };
 };
 
 
