@@ -467,8 +467,8 @@ public:
         if (row >= rowsCount)
             return;
 
-        float sx = (float) col * frameWf;
-        float sy = (float) row * frameHf;
+        const float sx = (float) col * frameWf;
+        const float sy = (float) row * frameHf;
 
         auto b = getLocalBounds().toFloat();
         const float ar = (frameAspect > 0.0001f ? frameAspect : 1.0f);
@@ -489,9 +489,10 @@ public:
         const float sw    = juce::jmax (1.0f, frameWf - 2.0f * bleed);
         const float sh    = juce::jmax (1.0f, frameHf - 2.0f * bleed);
 
-        g.drawImage (sheet,
-                     dx, dy, dw, dh,
-                     sx + bleed, sy + bleed, sw, sh);
+        // ✅ FIX C4244: usar overload con Rectangle<float>
+        const juce::Rectangle<float> dest (dx, dy, dw, dh);
+        const juce::Rectangle<float> src  (sx + bleed, sy + bleed, sw, sh);
+        g.drawImage (sheet, dest, src);
     }
 
 private:
@@ -953,22 +954,26 @@ inline void YourPluginAudioProcessor::tickTiltRamp() noexcept
         tiltHighCur = tiltHighTgt;
     }
 
-    // Escribir coeficientes (L/R iguales)
+    // ✅ FIX C2106: NO escribir por índice. Construir Coefficients y asignar completo.
     if (lowShelfL.coefficients != nullptr)
-        for (int i = 0; i < 6; ++i)
-            lowShelfL.coefficients->coefficients[(size_t) i] = tiltLowCur[(size_t) i];
+        *lowShelfL.coefficients = juce::dsp::IIR::Coefficients<float> (
+            tiltLowCur[0], tiltLowCur[1], tiltLowCur[2],
+            tiltLowCur[3], tiltLowCur[4], tiltLowCur[5]);
 
     if (lowShelfR.coefficients != nullptr)
-        for (int i = 0; i < 6; ++i)
-            lowShelfR.coefficients->coefficients[(size_t) i] = tiltLowCur[(size_t) i];
+        *lowShelfR.coefficients = juce::dsp::IIR::Coefficients<float> (
+            tiltLowCur[0], tiltLowCur[1], tiltLowCur[2],
+            tiltLowCur[3], tiltLowCur[4], tiltLowCur[5]);
 
     if (highShelfL.coefficients != nullptr)
-        for (int i = 0; i < 6; ++i)
-            highShelfL.coefficients->coefficients[(size_t) i] = tiltHighCur[(size_t) i];
+        *highShelfL.coefficients = juce::dsp::IIR::Coefficients<float> (
+            tiltHighCur[0], tiltHighCur[1], tiltHighCur[2],
+            tiltHighCur[3], tiltHighCur[4], tiltHighCur[5]);
 
     if (highShelfR.coefficients != nullptr)
-        for (int i = 0; i < 6; ++i)
-            highShelfR.coefficients->coefficients[(size_t) i] = tiltHighCur[(size_t) i];
+        *highShelfR.coefficients = juce::dsp::IIR::Coefficients<float> (
+            tiltHighCur[0], tiltHighCur[1], tiltHighCur[2],
+            tiltHighCur[3], tiltHighCur[4], tiltHighCur[5]);
 }
 
 //==============================================================================
