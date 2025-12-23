@@ -590,70 +590,21 @@ public:
         {
             juce::Image sheet;
 
-            // ✅ 2) CAMBIO: elegir el mejor de 3 grids para evitar “rayita”
             if (plugin::ui::loadImageFromBinaryDataByFilename ("header_sheet.png", sheet))
             {
                 const int totalFrames = 45;
 
-                auto scoreCandidate = [&] (int cols, int rows) -> long long
-                {
-                    cols = juce::jmax (1, cols);
-                    rows = juce::jmax (1, rows);
-
-                    const int W = sheet.getWidth();
-                    const int H = sheet.getHeight();
-
-                    const int fwInt = W / cols;
-                    const int fhInt = H / rows;
-                    if (fwInt <= 0 || fhInt <= 0)
-                        return std::numeric_limits<long long>::max();
-
-                    const int rem = (W % cols) + (H % rows);
-
-                    const float fw = (float) W / (float) cols;
-                    const float fh = (float) H / (float) rows;
-                    const float ar = (fh > 0.0001f ? fw / fh : 1.0f);
-
-                    const long long area = (long long) (fw * fh);
-
-                    long long aspectPenalty = 0;
-                    if (ar < 0.25f) aspectPenalty += (long long) ((0.25f - ar) * 1.0e12f);
-                    if (ar > 40.0f) aspectPenalty += (long long) ((ar - 40.0f) * 1.0e10f);
-
-                    return (long long) rem * 1000000LL - area + aspectPenalty;
-                };
-
-                // Candidato A: tira vertical 1xN
-                const int cA = 1;
-                const int rA = totalFrames;
-
-                // Candidato B: tira horizontal Nx1
-                const int cB = totalFrames;
-                const int rB = 1;
-
-                // Candidato C: inferencia (mejorada)
-                const auto inferred = plugin::ui::inferSpriteGrid (sheet, totalFrames);
-                const int cC = inferred.first;
-                const int rC = inferred.second;
-
-                // Elegimos el mejor score
-                int cols = cC, rows = rC;
-                long long best = scoreCandidate (cC, rC);
-
-                const long long sA = scoreCandidate (cA, rA);
-                if (sA < best) { best = sA; cols = cA; rows = rA; }
-
-                const long long sB = scoreCandidate (cB, rB);
-                if (sB < best) { best = sB; cols = cB; rows = rB; }
+                // ✅ Forzar SIEMPRE 1 columna (vertical strip)
+                const int cols = 1;
+                const int rows = totalFrames;
 
                #if JUCE_DEBUG
-                // Debug útil para confirmar que no estás agarrando frames ultra-angostos
-                const float fw = (float) sheet.getWidth()  / (float) cols;
-                const float fh = (float) sheet.getHeight() / (float) rows;
+                const float fw = (float) sheet.getWidth()  / (float) cols;   // = sheet width
+                const float fh = (float) sheet.getHeight() / (float) rows;   // = sheet height / frames
                 const float ar = (fh > 0.0001f ? fw / fh : 1.0f);
 
-                JUCE_DBG ("[HEADER] sheet=" + juce::String (sheet.getWidth()) + "x" + juce::String (sheet.getHeight())
-                          + " chosenGrid=" + juce::String (cols) + "x" + juce::String (rows)
+                JUCE_DBG ("[HEADER] FORCED VSTRIP sheet=" + juce::String (sheet.getWidth()) + "x" + juce::String (sheet.getHeight())
+                          + " grid=" + juce::String (cols) + "x" + juce::String (rows)
                           + " frame=" + juce::String (fw, 2) + "x" + juce::String (fh, 2)
                           + " ar=" + juce::String (ar, 3));
                #endif
