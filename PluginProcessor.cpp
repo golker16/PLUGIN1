@@ -1,5 +1,5 @@
 #include "PluginProcessor.h"
-#include <cstring> // std::memset
+#include <cstring> // std::memset, std::memcpy
 #include <mutex>   // std::once_flag, std::call_once
 #include <limits>  // std::numeric_limits
 
@@ -196,14 +196,11 @@ static std::pair<int, int> inferSpriteGrid (const juce::Image& sheet, int totalF
         // Area grande preferida
         const long long area = (long long) (fw * fh);
 
-        // Penaliza aspectos “absurdos” (que típicamente producen una rayita)
-        // Ajustá rangos si tu header es ultra ancho; esto evita ar ~ 0.01 o ar ~ 200.
+        // Penaliza aspectos “absurdos”
         long long aspectPenalty = 0;
         if (ar < 0.25f)  aspectPenalty += (long long) ((0.25f - ar) * 1.0e12f);
         if (ar > 40.0f)  aspectPenalty += (long long) ((ar - 40.0f) * 1.0e10f);
 
-        // Score: primero que divida bien (rem bajo), después área grande, y evita AR extremos.
-        // rem pesa muchísimo para priorizar grids “limpios”.
         return (long long) rem * 1000000LL - area + aspectPenalty;
     };
 
@@ -289,16 +286,13 @@ struct KnobLNF : public juce::LookAndFeel_V4
 public:
     KnobLNF()
     {
-        // Carga Typeface embebida (si existe).
         typeface = plugin::ui::getEmbeddedPluginTypeface();
 
-        // ComboBox (recuadro)
         setColour (juce::ComboBox::backgroundColourId, juce::Colours::black);
         setColour (juce::ComboBox::textColourId,       juce::Colours::white);
         setColour (juce::ComboBox::arrowColourId,      juce::Colours::white);
         setColour (juce::ComboBox::outlineColourId,    juce::Colours::black);
 
-        // PopupMenu (menú desplegable)
         setColour (juce::PopupMenu::backgroundColourId, juce::Colours::black);
         setColour (juce::PopupMenu::textColourId,       juce::Colours::white);
         setColour (juce::PopupMenu::highlightedBackgroundColourId, juce::Colour::fromRGB (20, 20, 20));
@@ -340,7 +334,6 @@ public:
         g.setColour (box.findColour (juce::ComboBox::outlineColourId));
         g.drawRoundedRectangle (r.reduced (0.5f), corner, 1.0f);
 
-        // flecha
         g.setColour (box.findColour (juce::ComboBox::arrowColourId));
         auto arrowArea = r.removeFromRight (22.0f).reduced (6.0f, 6.0f);
 
@@ -361,14 +354,11 @@ public:
                            float rotaryStartAngle, float rotaryEndAngle,
                            juce::Slider& slider) override
     {
-        // ✅ 1.5: ruedita a la mitad pero conservar grosor actual
         auto outer = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height)
                        .reduced (6.0f);
 
-        // radio base para mantener grosor como antes (basado en área grande)
         const float baseRadius = juce::jmin (outer.getWidth(), outer.getHeight()) * 0.5f;
 
-        // ruedita a la mitad (centrada)
         auto bounds = outer.withSizeKeepingCentre (outer.getWidth() * 0.5f,
                                                    outer.getHeight() * 0.5f);
 
@@ -381,7 +371,6 @@ public:
         const auto emptyCol = slider.findColour (juce::Slider::rotarySliderOutlineColourId);
         const auto fillCol  = slider.findColour (juce::Slider::rotarySliderFillColourId);
 
-        // grosor conservado (usa baseRadius, no radius chico)
         const float thickness = juce::jmax (2.0f, baseRadius * 0.12f);
 
         juce::Path bgArc;
@@ -401,8 +390,6 @@ public:
         g.strokePath (valueArc, juce::PathStrokeType (thickness,
                                                       juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
-
-        // ✅ manecilla eliminada -> solo vacío + relleno
     }
 
 private:
@@ -411,24 +398,16 @@ private:
 
 //------------------------------------------------------------------------------
 // Animated header from sprite sheet (assets/header_sheet.png)
-// Soporta:
-// - tira 1xN (default)
-// - grilla CxR (ej. 9x5 = 45 frames)
 class AnimatedHeader final : public juce::Component,
                              private juce::Timer
 {
 public:
-    // totalFrames: cantidad total de frames (ej. 45)
-    // fps: frames por segundo
-    // columns: si es 0 -> asume tira 1xN (columns = totalFrames, rows = 1)
-    // rows: si es 0 -> calcula rows = ceil(totalFrames / columns)
     void setSpriteSheet (juce::Image sheetImage, int totalFrames, int fps, int columns = 0, int rows = 0)
     {
         sheet = sheetImage;
         numFrames  = juce::jmax (1, totalFrames);
         frameIndex = 0;
 
-        // reset dims/aspect
         frameWf = 0.0f;
         frameHf = 0.0f;
         frameAspect = 1.0f;
@@ -440,19 +419,16 @@ public:
             return;
         }
 
-        // Default: tira horizontal 1xN
         cols = (columns > 0 ? columns : numFrames);
         cols = juce::jmax (1, cols);
 
-        // Auto rows si no lo pasan
         if (rows > 0)
             rowsCount = rows;
         else
-            rowsCount = (numFrames + cols - 1) / cols; // ceil
+            rowsCount = (numFrames + cols - 1) / cols;
 
         rowsCount = juce::jmax (1, rowsCount);
 
-        // ✅ floats para evitar truncado por división entera (recortes más exactos)
         frameWf = (float) sheet.getWidth()  / (float) cols;
         frameHf = (float) sheet.getHeight() / (float) rowsCount;
 
@@ -467,7 +443,6 @@ public:
 
     void stop() { stopTimer(); }
 
-    // ✅ expone aspect ratio real del frame para dimensionar el header en resized()
     float getFrameAspect() const noexcept { return frameAspect; }
 
     void paint (juce::Graphics& g) override
@@ -480,7 +455,6 @@ public:
         const int col = frameIndex % cols;
         const int row = frameIndex / cols;
 
-        // Si el sheet tiene más celdas que frames (grilla incompleta), corta seguro
         if (row >= rowsCount)
             return;
 
@@ -490,7 +464,6 @@ public:
         auto b = getLocalBounds().toFloat();
         const float ar = (frameAspect > 0.0001f ? frameAspect : 1.0f);
 
-        // “Contain” manteniendo aspecto (centrado)
         float dw = b.getWidth();
         float dh = dw / ar;
 
@@ -503,7 +476,6 @@ public:
         const float dx = b.getX() + (b.getWidth()  - dw) * 0.5f;
         const float dy = b.getY() + (b.getHeight() - dh) * 0.5f;
 
-        // ✅ bleed fix: recorta un pelín el source para evitar que se cuele el frame vecino
         const float bleed = juce::jmin (bleedFixPx, 0.25f * juce::jmin (frameWf, frameHf));
         const float sw    = juce::jmax (1.0f, frameWf - 2.0f * bleed);
         const float sh    = juce::jmax (1.0f, frameHf - 2.0f * bleed);
@@ -531,12 +503,10 @@ private:
     int cols      = 1;
     int rowsCount = 1;
 
-    // ✅ floats para recorte exacto + aspect ratio
     float frameWf      = 0.0f;
     float frameHf      = 0.0f;
     float frameAspect  = 1.0f;
 
-    // ✅ evita “sangrado” de frames vecinos al escalar
     float bleedFixPx   = 0.5f;
 };
 
@@ -551,30 +521,23 @@ public:
         , toneKnob  ("Tone")
         , mixKnob   ("Mix")
     {
-        // LookAndFeel per knob (colores por slider)
         driveKnob.slider.setLookAndFeel (&knobLNF);
         toneKnob .slider.setLookAndFeel (&knobLNF);
         mixKnob  .slider.setLookAndFeel (&knobLNF);
 
-        // ✅ Colores (AARRGGBB)
-        // DRIVE: vacío 006700, lleno 65ff65
         driveKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF006700"));
         driveKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FF65FF65"));
 
-        // TONE: vacío f9ff34, lleno cc66ff
         toneKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FFF9FF34"));
         toneKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFCC66FF"));
 
-        // MIX: vacío 555555, lleno ffffff
         mixKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF555555"));
         mixKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF"));
 
-        // Labels más pequeños (por si compilas sin PNGs)
         driveKnob.label.setFont (juce::Font (11.0f));
         toneKnob .label.setFont (juce::Font (11.0f));
         mixKnob  .label.setFont (juce::Font (11.0f));
 
-        // Fuente embebida: aplica a texto de labels (y otros componentes que usen este L&F)
         driveKnob.label.setLookAndFeel (&knobLNF);
         toneKnob .label.setLookAndFeel (&knobLNF);
         mixKnob  .label.setLookAndFeel (&knobLNF);
@@ -586,51 +549,31 @@ public:
         addAndMakeVisible (header);
 
        #if PLUGIN_HAS_ASSETS
-        // header_sheet.png -> sprite sheet animado (45 frames)
         {
             juce::Image sheet;
 
             if (plugin::ui::loadImageFromBinaryDataByFilename ("header_sheet.png", sheet))
             {
                 const int totalFrames = 45;
-
-                // ✅ Forzar SIEMPRE 1 columna (vertical strip)
                 const int cols = 1;
                 const int rows = totalFrames;
 
-               #if JUCE_DEBUG
-                const float fw = (float) sheet.getWidth()  / (float) cols;   // = sheet width
-                const float fh = (float) sheet.getHeight() / (float) rows;   // = sheet height / frames
-                const float ar = (fh > 0.0001f ? fw / fh : 1.0f);
-
-                JUCE_DBG ("[HEADER] FORCED VSTRIP sheet=" + juce::String (sheet.getWidth()) + "x" + juce::String (sheet.getHeight())
-                          + " grid=" + juce::String (cols) + "x" + juce::String (rows)
-                          + " frame=" + juce::String (fw, 2) + "x" + juce::String (fh, 2)
-                          + " ar=" + juce::String (ar, 3));
-               #endif
-
-                header.setSpriteSheet (sheet, /*totalFrames*/ totalFrames, /*fps*/ 3, /*columns*/ cols, /*rows*/ rows);
+                header.setSpriteSheet (sheet, totalFrames, 3, cols, rows);
             }
         }
        #endif
 
-
-        // ✅ PNG encima de knobs (desde /assets -> BinaryData) SOLO si existe
        #if PLUGIN_HAS_ASSETS
         driveKnob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::drive_png, BinaryData::drive_pngSize));
         toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
 
-        // ✅ 1.4: tamaños diferentes del slot de PNG por knob
-        driveKnob.setLabelSlotHeights (12, 14); // más chico aún
-        mixKnob  .setLabelSlotHeights (12, 14); // más chico aún
-        toneKnob .setLabelSlotHeights (20, 14); // un poco más grande
+        driveKnob.setLabelSlotHeights (12, 14);
+        mixKnob  .setLabelSlotHeights (12, 14);
+        toneKnob .setLabelSlotHeights (20, 14);
        #endif
 
-        // ComboBox presets (mantiene el control)
         preampBox.setJustificationType (juce::Justification::centredLeft);
-
-        // Fuente embebida: ComboBox + menú desplegable usan el LookAndFeel del ComboBox
         preampBox.setLookAndFeel (&knobLNF);
 
         int itemId = 1;
@@ -642,7 +585,6 @@ public:
 
         addAndMakeVisible (preampBox);
 
-        // Oversampling selector (para ahorrar recursos en proyectos no-mix)
         osBox.setJustificationType (juce::Justification::centredLeft);
         osBox.setLookAndFeel (&knobLNF);
         osBox.addItem ("x1", 1);
@@ -660,7 +602,6 @@ public:
         preampAtt = std::make_unique<ComboBoxAttachment> (processor.apvts, "preamp", preampBox);
         osAtt     = std::make_unique<ComboBoxAttachment> (processor.apvts, "os",     osBox);
 
-        // ✅ UI más grande
         setSize (820, 460);
     }
 
@@ -668,7 +609,6 @@ public:
     {
         header.stop();
 
-        // Limpieza L&F (importante para evitar dangling pointers)
         preampBox.setLookAndFeel (nullptr);
         osBox.setLookAndFeel (nullptr);
         driveKnob.label.setLookAndFeel (nullptr);
@@ -689,41 +629,32 @@ public:
     {
         auto area = getLocalBounds().reduced (44);
 
-        // ✅ Header: se dimensiona según aspect ratio real del frame (sin deformar)
         int headerH = 72;
-
         const float ar = header.getFrameAspect();
         if (ar > 0.01f)
         {
-            // Queremos que el dibujo pueda llenar el ancho sin “letterbox”
             headerH = juce::roundToInt ((float) area.getWidth() / ar);
-
-            // límites razonables para que no se coma toda la UI
             headerH = juce::jlimit (56, 160, headerH);
         }
 
         auto headerArea = area.removeFromTop (headerH).reduced (6, 6);
         header.setBounds (headerArea);
 
-        // Aire entre header y knobs
         area.removeFromTop (16);
 
-        // Barra inferior (selector Preamp)
         auto bottom = area.removeFromBottom (74);
 
-        // --- Layout knobs (pequeños, pegados y a la izquierda) ---
-        const int knobW = 90;     // componente LabeledKnob
+        const int knobW = 90;
         const int knobH = 104;
-        const int gap   = 8;      // arrimados
+        const int gap   = 8;
 
-        const int startX = area.getX();   // pegado a la izquierda
-        const int y      = area.getY();   // arriba del bloque de knobs
+        const int startX = area.getX();
+        const int y      = area.getY();
 
         driveKnob.setBounds (startX,                         y, knobW, knobH);
         toneKnob .setBounds (startX + knobW + gap,           y, knobW, knobH);
         mixKnob  .setBounds (startX + (knobW + gap) * 2,     y, knobW, knobH);
 
-        // --- Bottom row: [Oversampling] [Preamp] ---
         bottom.reduce (0, 10);
 
         auto osArea = bottom.removeFromLeft (juce::jmax (120, bottom.getWidth() / 3));
@@ -767,8 +698,6 @@ YourPluginAudioProcessor::YourPluginAudioProcessor()
     pOS     = apvts.getRawParameterValue ("os");
 
 #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
-    // Aplica una sola vez la fuente embebida como Sans Serif por defecto.
-    // Esto afecta a menús/listas/popup menus y textos que usen el LookAndFeel default.
     static std::once_flag sFontOnce;
     std::call_once (sFontOnce, []()
     {
@@ -835,36 +764,26 @@ void YourPluginAudioProcessor::setStateInformation (const void* data, int sizeIn
 // Tilt
 void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
 {
-    // Tone "robusto" tipo tilt:
-    // - centro exacto (0.5) = neutro
-    // - derecha = oscuro, izquierda = brillante
-    // - curva + rango asimétrico (ver plugin::mapToneTiltDb)
     const float t = juce::jlimit (0.0f, 1.0f, tone01);
     const float tiltDb = plugin::mapToneTiltDb (t);
 
-    // Hacemos el tilt más estable/musical variando un poquito los puntos de shelf
-    // según cuánto te alejes del centro. Esto evita que se sienta como dos shelves
-    // rígidos y ayuda a que el control sea "piola" en cualquier preset.
     const float mag01 = juce::jlimit (0.0f, 1.0f, std::abs (tiltDb) / 9.0f);
 
-    // Valores base (calibrados para que no suene nasal/harsh)
     const float fcLowBase  = 240.0f;
     const float fcHighBase = 3200.0f;
 
-    // Con más tilt, acercamos un poco el high shelf hacia el medio (dark) o lo
-    // alejamos (bright). Low shelf también se mueve levemente para mantener pivot.
     float fcLow  = fcLowBase;
     float fcHigh = fcHighBase;
 
     if (tiltDb < 0.0f) // dark
     {
-        fcHigh = fcHighBase * (1.0f - 0.35f * mag01); // baja hasta ~65%
-        fcLow  = fcLowBase  * (1.0f + 0.20f * mag01); // sube levemente
+        fcHigh = fcHighBase * (1.0f - 0.35f * mag01);
+        fcLow  = fcLowBase  * (1.0f + 0.20f * mag01);
     }
     else if (tiltDb > 0.0f) // bright
     {
-        fcHigh = fcHighBase * (1.0f + 0.55f * mag01); // sube hasta ~155%
-        fcLow  = fcLowBase  * (1.0f - 0.15f * mag01); // baja levemente
+        fcHigh = fcHighBase * (1.0f + 0.55f * mag01);
+        fcLow  = fcLowBase  * (1.0f - 0.15f * mag01);
     }
 
     fcLow  = juce::jlimit (90.0f,  650.0f, fcLow);
@@ -898,20 +817,18 @@ void YourPluginAudioProcessor::ensureOversamplers (int numChannels)
 {
     const int ch = juce::jmax (1, juce::jmin (2, numChannels));
 
-    // Ya existen y coinciden
     if (ch == oversamplerChannels && oversamplers[1] != nullptr)
         return;
 
     oversamplerChannels = ch;
 
-    // Recrear oversamplers para este layout de canales (evita accesos fuera de rango)
     for (int i = 1; i <= kMaxOversamplingIndex; ++i)
     {
         oversamplers[i] = std::make_unique<juce::dsp::Oversampling<float>> (
             (size_t) oversamplerChannels,
             i,
             juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
-            true /* max quality */);
+            true);
 
         oversamplers[i]->reset();
     }
@@ -929,6 +846,10 @@ void YourPluginAudioProcessor::initOversamplers (int maxBlockSize)
             oversamplers[i]->initProcessing (bs);
 }
 
+// ⚠️ IMPORTANTE:
+// Este método queda para “setear punteros / latency / buffers”.
+// NO debe resetear oversampler en caliente por cambios de OS: ahora el cambio es via crossfade.
+// Se usa solo en prepareToPlay() y en casos force (layout changes) donde no hay audio continuo.
 void YourPluginAudioProcessor::applyOversamplingIndex (int newIndex, bool force)
 {
     const int idx = juce::jlimit (0, kMaxOversamplingIndex, newIndex);
@@ -941,7 +862,6 @@ void YourPluginAudioProcessor::applyOversamplingIndex (int newIndex, bool force)
 
     if (oversampling != nullptr)
     {
-        // Evita heredar estados del filtro anterior al cambiar de modo
         oversampling->reset();
         oversampling->initProcessing ((size_t) juce::jmax (1, maxBlockSizePrepared));
     }
@@ -959,26 +879,12 @@ void YourPluginAudioProcessor::applyOversamplingIndex (int newIndex, bool force)
 
     const float osFactor = (idx == 0 ? 1.0f : (float) (1u << idx));
     osSr = (float) (sr * (double) osFactor);
-
-    if (activePreset != nullptr)
-    {
-        for (int ch = 0; ch < wetCh; ++ch)
-        {
-            if (! presetStateConstructed[(size_t) ch])
-                continue;
-
-            void* st = (void*) &presetState[(size_t) ch];
-            if (activePreset->prepare) activePreset->prepare (st, osSr);
-            if (activePreset->reset)   activePreset->reset   (st);
-        }
-    }
 }
 
 void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-    // Smoothing 20ms
     driveSm.reset (sr, 0.02);
     toneSm .reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
@@ -987,7 +893,6 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .setCurrentAndTargetValue (*pTone);
     mixSm  .setCurrentAndTargetValue (*pMix);
 
-    // Inicializa coef pointers (evita null)
     lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     lowShelfR.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
     highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
@@ -995,49 +900,63 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 
     updateTiltCoeffs (*pTone);
 
-    // ✅ AutoGain por bloque (entrada alineada vs salida real) para volumen constante
     autoGain.prepare (sr);
 
-    // Guardar block size inicial (si el host luego usa uno mayor, creceremos buffers/OS)
     maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
 
-    // Canales reales (mono/stereo) para respetar distribución original del input
     const int wetCh = juce::jmax (1, juce::jmin (2, getTotalNumInputChannels()));
 
-    // Oversampling (seleccionable en runtime)
-    // Nota: pre-creamos oversamplers x2/x4/x8 para evitar reallocs al cambiar el modo.
     ensureOversamplers (wetCh);
     initOversamplers (maxBlockSizePrepared);
 
-    // buffers
     wetBuffer.setSize (wetCh, maxBlockSizePrepared, false, false, true);
 
+    // Buffers crossfade (prealocados al máximo)
+    wetOld.setSize (wetCh, maxBlockSizePrepared, false, false, true);
+    wetNew.setSize (wetCh, maxBlockSizePrepared, false, false, true);
+
     // ---------------------------------------------------------------------
-    // Preset state lifecycle
-    //
-    // prepareToPlay() puede llamarse múltiples veces. Si ya teníamos un preset
-    // activo, destruimos los estados construidos para evitar UB.
-    if (activePreset != nullptr && activePreset->destruct != nullptr)
+    // Destruir bancos A/B correctamente (usando el preset que “sabemos” que tienen):
+    auto destructBank = [&] (std::array<PresetStateStorage, 2>& bank,
+                             std::array<bool, 2>& flags,
+                             int presetIndex)
     {
+        if (presetIndex < 0 || presetIndex >= (int) PresetRegistry::items.size())
+            return;
+
+        const auto* pr = &PresetRegistry::items[(size_t) presetIndex];
+        if (pr == nullptr || pr->destruct == nullptr)
+            return;
+
         for (int ch = 0; ch < wetCh; ++ch)
         {
-            if (presetStateConstructed[(size_t) ch])
-                activePreset->destruct ((void*) &presetState[(size_t) ch]);
+            if (flags[(size_t) ch])
+                pr->destruct ((void*) &bank[(size_t) ch]);
         }
-    }
+    };
 
-    presetStateConstructed = {{ false, false }};
+    // activePresetIndex = banco activo (inicialmente activoState apunta a A)
+    // pendingPresetIndex (FUERA de transición) lo usamos para “qué preset vive en el banco INACTIVO”
+    destructBank (presetStateA, presetStateConstructedA, activePresetIndex);
+    destructBank (presetStateB, presetStateConstructedB, pendingPresetIndex);
 
-    // Limpia bytes (no es estrictamente necesario, pero deja todo en un estado limpio)
-    for (auto& st : presetState)
-        std::memset (&st, 0, sizeof (st));
+    presetStateConstructedA = {{ false, false }};
+    presetStateConstructedB = {{ false, false }};
+    for (auto& st : presetStateA) std::memset (&st, 0, sizeof (st));
+    for (auto& st : presetStateB) std::memset (&st, 0, sizeof (st));
 
-    // ---- PRESET inicial (blindado) ----
+    // Reset transición
+    transitioning = false;
+    xfadeTotalSamples = 0;
+    xfadePosSamples = 0;
+
+    // ---- PRESET inicial ----
     activePresetIndex = -1;
     activePreset = nullptr;
+
+    // OS inicial (forzado)
     applyOversamplingIndex (getDesiredOversamplingIndex(), true);
 
-    // delay para DRY alineado con latencia de oversampling
     dryDelayBufferSize = juce::jmax (1, maxBlockSizePrepared + dryDelaySamples + 1);
     dryDelayBuffer.setSize (wetCh, dryDelayBufferSize, false, false, true);
     dryDelayBuffer.clear();
@@ -1053,18 +972,316 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
         activePresetIndex = preampIndex;
         activePreset = &PresetRegistry::items[(size_t) preampIndex];
 
+        // (re)apuntar bancos por defecto
+        activeState  = &presetStateA;
+        pendingState = &presetStateB;
+        activeConstructed  = &presetStateConstructedA;
+        pendingConstructed = &presetStateConstructedB;
+
+        // inicializar “meta” del banco inactivo (fuera de transición)
+        pendingPresetIndex = activePresetIndex;
+        pendingOSIndex     = currentOSIndex;
+
+        const float effectiveSr = (oversampling != nullptr ? osSr : (float) sr);
+        stereoA.prepare (effectiveSr);
+        stereoB.prepare (effectiveSr);
+        stereoA.reset();
+        stereoB.reset();
+
         for (int ch = 0; ch < wetCh; ++ch)
         {
-            void* st = (void*) &presetState[(size_t) ch];
+            void* st = (void*) &getActiveStateStorage (ch);
             if (activePreset->construct != nullptr)
             {
                 activePreset->construct (st);
-                presetStateConstructed[(size_t) ch] = true;
+                getActiveConstructed (ch) = true;
             }
-            if (activePreset->prepare) activePreset->prepare (st, osSr);
+            if (activePreset->prepare) activePreset->prepare (st, (oversampling != nullptr ? osSr : (float) sr));
             if (activePreset->reset)   activePreset->reset (st);
         }
     }
+}
+
+//==============================================================================
+// ✅ Crossfade helpers (IMPLEMENTACIÓN)
+
+// Render de cadena A (usa activePreset + active bank + stereoA)
+void YourPluginAudioProcessor::renderChainA (juce::AudioBuffer<float>& io, int wetCh, int numSamples)
+{
+    if (activePreset == nullptr || activePreset->process == nullptr)
+        return;
+
+    const int osIdx = currentOSIndex;
+    auto* osPtr = (osIdx == 0 ? nullptr : oversamplers[osIdx].get());
+
+    if (osPtr != nullptr)
+    {
+        juce::dsp::AudioBlock<float> baseBlock (io);
+        baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
+
+        auto osBlock = osPtr->processSamplesUp (baseBlock);
+        const size_t osSamples = osBlock.getNumSamples();
+        const size_t osCh = osBlock.getNumChannels();
+
+        if (osCh >= 2 && wetCh >= 2)
+        {
+            float* L = osBlock.getChannelPointer (0);
+            float* R = osBlock.getChannelPointer (1);
+
+            void* stL = (void*) &getActiveStateStorage (0);
+            void* stR = (void*) &getActiveStateStorage (1);
+
+            for (size_t n = 0; n < osSamples; ++n)
+            {
+                L[n] = activePreset->process (stL, L[n]);
+                R[n] = activePreset->process (stR, R[n]);
+                stereoA.processSample (L[n], R[n]); // ✅ Stereo vida real ON
+            }
+        }
+        else
+        {
+            // mono (o layout extraño)
+            float* data = osBlock.getChannelPointer (0);
+            void* st = (void*) &getActiveStateStorage (0);
+
+            for (size_t n = 0; n < osSamples; ++n)
+                data[n] = activePreset->process (st, data[n]);
+        }
+
+        osPtr->processSamplesDown (baseBlock);
+    }
+    else
+    {
+        // x1
+        float* wetL = io.getWritePointer (0);
+        float* wetR = (wetCh > 1) ? io.getWritePointer (1) : nullptr;
+
+        if (wetCh >= 2 && wetR != nullptr)
+        {
+            void* stL = (void*) &getActiveStateStorage (0);
+            void* stR = (void*) &getActiveStateStorage (1);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                wetL[i] = activePreset->process (stL, wetL[i]);
+                wetR[i] = activePreset->process (stR, wetR[i]);
+                stereoA.processSample (wetL[i], wetR[i]); // ✅
+            }
+        }
+        else
+        {
+            void* st = (void*) &getActiveStateStorage (0);
+            for (int i = 0; i < numSamples; ++i)
+                wetL[i] = activePreset->process (st, wetL[i]);
+        }
+    }
+}
+
+// Render de cadena B (usa pendingPresetIndex + pending bank + stereoB)
+void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int wetCh, int numSamples)
+{
+    if (pendingPresetIndex < 0 || pendingPresetIndex >= (int) PresetRegistry::items.size())
+        return;
+
+    const auto* pendingPreset = &PresetRegistry::items[(size_t) pendingPresetIndex];
+    if (pendingPreset == nullptr || pendingPreset->process == nullptr)
+        return;
+
+    const int osIdx = pendingOSIndex;
+    auto* osPtr = (osIdx == 0 ? nullptr : oversamplers[osIdx].get());
+
+    if (osPtr != nullptr)
+    {
+        juce::dsp::AudioBlock<float> baseBlock (io);
+        baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
+
+        auto osBlock = osPtr->processSamplesUp (baseBlock);
+        const size_t osSamples = osBlock.getNumSamples();
+        const size_t osCh = osBlock.getNumChannels();
+
+        if (osCh >= 2 && wetCh >= 2)
+        {
+            float* L = osBlock.getChannelPointer (0);
+            float* R = osBlock.getChannelPointer (1);
+
+            void* stL = (void*) &getPendingStateStorage (0);
+            void* stR = (void*) &getPendingStateStorage (1);
+
+            for (size_t n = 0; n < osSamples; ++n)
+            {
+                L[n] = pendingPreset->process (stL, L[n]);
+                R[n] = pendingPreset->process (stR, R[n]);
+                stereoB.processSample (L[n], R[n]); // ✅ Stereo vida real ON
+            }
+        }
+        else
+        {
+            float* data = osBlock.getChannelPointer (0);
+            void* st = (void*) &getPendingStateStorage (0);
+
+            for (size_t n = 0; n < osSamples; ++n)
+                data[n] = pendingPreset->process (st, data[n]);
+        }
+
+        osPtr->processSamplesDown (baseBlock);
+    }
+    else
+    {
+        float* wetL = io.getWritePointer (0);
+        float* wetR = (wetCh > 1) ? io.getWritePointer (1) : nullptr;
+
+        if (wetCh >= 2 && wetR != nullptr)
+        {
+            void* stL = (void*) &getPendingStateStorage (0);
+            void* stR = (void*) &getPendingStateStorage (1);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                wetL[i] = pendingPreset->process (stL, wetL[i]);
+                wetR[i] = pendingPreset->process (stR, wetR[i]);
+                stereoB.processSample (wetL[i], wetR[i]); // ✅
+            }
+        }
+        else
+        {
+            void* st = (void*) &getPendingStateStorage (0);
+            for (int i = 0; i < numSamples; ++i)
+                wetL[i] = pendingPreset->process (st, wetL[i]);
+        }
+    }
+}
+
+// Inicia transición: construye preset/OS destino en el banco INACTIVO (pending*)
+void YourPluginAudioProcessor::beginTransition (int newPreset, int newOS, int wetCh, int numSamples)
+{
+    if (transitioning)
+        return;
+
+    if (newPreset < 0 || newPreset >= (int) PresetRegistry::items.size())
+        return;
+
+    newOS = juce::jlimit (0, kMaxOversamplingIndex, newOS);
+
+    // ------------- preparar fade (10ms clamp 5..20ms) -------------
+    const int minS = juce::jmax (8, (int) std::lround (sr * 0.005));
+    const int maxS = juce::jmax (minS + 1, (int) std::lround (sr * 0.020));
+    const int defS = (int) std::lround (sr * 0.010);
+
+    xfadeTotalSamples = juce::jlimit (minS, maxS, defS);
+    xfadePosSamples   = 0;
+
+    // ------------- limpiar/destruir el banco inactivo ANTES de reutilizarlo -------------
+    // FUERA de transición, pendingPresetIndex/pendingOSIndex guardan “qué vive en el banco inactivo”.
+    const int oldInactivePreset = pendingPresetIndex;
+
+    if (oldInactivePreset >= 0 && oldInactivePreset < (int) PresetRegistry::items.size())
+    {
+        const auto* oldPr = &PresetRegistry::items[(size_t) oldInactivePreset];
+        if (oldPr != nullptr && oldPr->destruct != nullptr)
+        {
+            for (int ch = 0; ch < wetCh; ++ch)
+            {
+                if (getPendingConstructed (ch))
+                    oldPr->destruct ((void*) &getPendingStateStorage (ch));
+            }
+        }
+    }
+
+    for (int ch = 0; ch < wetCh; ++ch)
+    {
+        getPendingConstructed (ch) = false;
+        std::memset (&getPendingStateStorage (ch), 0, sizeof (PresetStateStorage));
+    }
+
+    // ------------- setear target -------------
+    pendingPresetIndex = newPreset;
+    pendingOSIndex     = newOS;
+
+    // ------------- preparar oversampler del destino (B) sin tocar el activo -------------
+    if (pendingOSIndex != 0 && oversamplers[pendingOSIndex] != nullptr)
+    {
+        oversamplers[pendingOSIndex]->reset();
+        oversamplers[pendingOSIndex]->initProcessing ((size_t) juce::jmax (1, maxBlockSizePrepared));
+    }
+
+    // ------------- construir el preset destino en el banco B -------------
+    const auto* pr = &PresetRegistry::items[(size_t) pendingPresetIndex];
+
+    const float osFactor = (pendingOSIndex == 0 ? 1.0f : (float) (1u << pendingOSIndex));
+    const float pendingSr = (float) (sr * (double) osFactor);
+
+    // ✅ StereoInteract: preparar a SR efectivo del dominio donde corre (OS si hay OS)
+    stereoB.prepare (pendingSr);
+    stereoB.reset();
+
+    for (int ch = 0; ch < wetCh; ++ch)
+    {
+        void* st = (void*) &getPendingStateStorage (ch);
+        if (pr->construct != nullptr)
+        {
+            pr->construct (st);
+            getPendingConstructed (ch) = true;
+        }
+        if (pr->prepare) pr->prepare (st, pendingSr);
+        if (pr->reset)   pr->reset (st);
+    }
+
+    // buffers crossfade (asegura tamaño)
+    if (wetOld.getNumChannels() != wetCh || wetOld.getNumSamples() < maxBlockSizePrepared)
+        wetOld.setSize (wetCh, maxBlockSizePrepared, false, false, true);
+
+    if (wetNew.getNumChannels() != wetCh || wetNew.getNumSamples() < maxBlockSizePrepared)
+        wetNew.setSize (wetCh, maxBlockSizePrepared, false, false, true);
+
+    transitioning = true;
+}
+
+// Commit: swap de bancos + stereo, y aplicar nueva “config” sin resetear estados
+void YourPluginAudioProcessor::commitTransition (int wetCh)
+{
+    if (!transitioning)
+        return;
+
+    const int oldActivePreset = activePresetIndex;
+    const int oldActiveOS     = currentOSIndex;
+
+    // swap bancos
+    std::swap (activeState, pendingState);
+    std::swap (activeConstructed, pendingConstructed);
+
+    // swap stereo
+    std::swap (stereoA, stereoB);
+
+    // nuevo activo = target
+    activePresetIndex = pendingPresetIndex;
+    activePreset = (activePresetIndex >= 0 && activePresetIndex < (int) PresetRegistry::items.size())
+                 ? &PresetRegistry::items[(size_t) activePresetIndex]
+                 : nullptr;
+
+    // OS activo = target (SIN resetear el oversampler: ya viene “caminado” durante la transición)
+    currentOSIndex = juce::jlimit (0, kMaxOversamplingIndex, pendingOSIndex);
+    oversampling   = (currentOSIndex == 0 ? nullptr : oversamplers[currentOSIndex].get());
+
+    // latency/dry-delay acorde al OS nuevo
+    const int latency = (oversampling != nullptr) ? (int) oversampling->getLatencyInSamples() : 0;
+    setLatencySamples (latency);
+
+    dryDelaySamples  = latency;
+    dryDelayWritePos = 0;
+
+    dryDelayBufferSize = juce::jmax (1, maxBlockSizePrepared + dryDelaySamples + 1);
+    dryDelayBuffer.setSize (wetCh, dryDelayBufferSize, false, false, true);
+    dryDelayBuffer.clear();
+
+    const float osFactor = (currentOSIndex == 0 ? 1.0f : (float) (1u << currentOSIndex));
+    osSr = (float) (sr * (double) osFactor);
+
+    // fuera de transición, pendingPresetIndex/pendingOSIndex pasan a describir el banco inactivo (el viejo activo)
+    pendingPresetIndex = oldActivePreset;
+    pendingOSIndex     = oldActiveOS;
+
+    transitioning = false;
+    xfadePosSamples = 0;
 }
 
 //==============================================================================
@@ -1078,27 +1295,28 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     const int wetCh = juce::jmax (1, juce::jmin (2, numCh));
 
-    // Si el host cambia a mono/estéreo, recrea oversamplers para evitar accesos inválidos.
+    // layout change (mono<->stereo)
     if (wetCh != oversamplerChannels)
     {
         ensureOversamplers (wetCh);
         applyOversamplingIndex (currentOSIndex, true);
+
+        // re-prealloc buffers crossfade
+        wetBuffer.setSize (wetCh, juce::jmax (maxBlockSizePrepared, numSamples), false, false, true);
+        wetOld.setSize    (wetCh, juce::jmax (maxBlockSizePrepared, numSamples), false, false, true);
+        wetNew.setSize    (wetCh, juce::jmax (maxBlockSizePrepared, numSamples), false, false, true);
     }
 
-    // Aplicar cambio de oversampling (x1/x2/x4/x8) en runtime
-    applyOversamplingIndex (getDesiredOversamplingIndex(), false);
-
-    // FL Studio y otros hosts pueden variar el block size. Si crece,
-    // re-inicializamos oversampling y buffers para evitar desalineaciones.
+    // block size variable
     if (numSamples > maxBlockSizePrepared)
     {
         maxBlockSizePrepared = numSamples;
         initOversamplers (maxBlockSizePrepared);
 
-        // crecer wetBuffer (pre OS)
         wetBuffer.setSize (wetCh, maxBlockSizePrepared, false, false, true);
+        wetOld.setSize    (wetCh, maxBlockSizePrepared, false, false, true);
+        wetNew.setSize    (wetCh, maxBlockSizePrepared, false, false, true);
 
-        // crecer delay para DRY alineado
         dryDelayBufferSize = maxBlockSizePrepared + dryDelaySamples + 1;
         dryDelayBuffer.setSize (wetCh, dryDelayBufferSize, false, false, true);
         dryDelayBuffer.clear();
@@ -1115,66 +1333,43 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     toneSm .setTargetValue (*pTone);
     mixSm  .setTargetValue (*pMix);
 
-    // Selección de preset
-    int preampIndex = 0;
+    // Selección de preset deseado
+    int desiredPreset = 0;
     if (pPreamp != nullptr && PresetRegistry::items.size() > 0)
-        preampIndex = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
-                                    (int) std::lround (*pPreamp));
+        desiredPreset = juce::jlimit (0, (int) PresetRegistry::items.size() - 1,
+                                      (int) std::lround (*pPreamp));
 
-    if ((activePreset == nullptr || preampIndex != activePresetIndex) && PresetRegistry::items.size() > 0)
+    // OS deseado
+    const int desiredOS = getDesiredOversamplingIndex();
+
+    // ✅ A. Detectar cambios sin resetear/destruir de golpe
+    if (!transitioning)
     {
-        // Destruir estado anterior antes de cambiar de preset
-        if (activePreset != nullptr && activePreset->destruct != nullptr)
+        const bool needPresetChange = (activePreset == nullptr || desiredPreset != activePresetIndex);
+        const bool needOSChange     = (desiredOS != currentOSIndex);
+
+        if ((needPresetChange || needOSChange) && PresetRegistry::items.size() > 0)
         {
-            for (int ch = 0; ch < wetCh; ++ch)
-            {
-                if (presetStateConstructed[(size_t) ch])
-                    activePreset->destruct ((void*) &presetState[(size_t) ch]);
-            }
-        }
-
-        presetStateConstructed = {{ false, false }};
-
-        activePresetIndex = preampIndex;
-        activePreset = &PresetRegistry::items[(size_t) preampIndex];
-
-        const float osFactor = (currentOSIndex == 0 ? 1.0f : (float) (1u << currentOSIndex));
-        osSr = (float) (sr * (double) osFactor);
-
-        for (int ch = 0; ch < wetCh; ++ch)
-        {
-            void* st = (void*) &presetState[(size_t) ch];
-            if (activePreset->construct != nullptr)
-            {
-                activePreset->construct (st);
-                presetStateConstructed[(size_t) ch] = true;
-            }
-            if (activePreset->prepare) activePreset->prepare (st, osSr);
-            if (activePreset->reset)   activePreset->reset (st);
+            // iniciar transición (no destruir ni resetear el activo)
+            beginTransition (desiredPreset, desiredOS, wetCh, numSamples);
         }
     }
 
     // -------------------------------------------------------------------------
-    // 0) Tone smoothing + tilt (SUB-BLOQUES) para evitar zipper/click con automatización rápida
-    toneSm.setTargetValue (*pTone);
+    // 0) Tone smoothing + tilt (SUB-BLOQUES)
+    constexpr int kTiltUpdateStride = 32;
 
-    // Asegura wetBuffer sin realocar cada bloque
     if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < numSamples)
         wetBuffer.setSize (wetCh, numSamples, false, false, true);
 
     auto* wetL = wetBuffer.getWritePointer (0);
     auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
-    // -------------------------------------------------------------------------
-    // 1) WET base SR: pregain + tilt  (coef update cada 32 samples)
-    constexpr int kTiltUpdateStride = 32;
-
     int i0 = 0;
     while (i0 < numSamples)
     {
         const int chunk = juce::jmin (kTiltUpdateStride, numSamples - i0);
 
-        // Actualiza coeficientes con el valor suavizado ACTUAL (sample&hold por sub-bloque)
         updateTiltCoeffs (toneSm.getCurrentValue());
 
         for (int k = 0; k < chunk; ++k)
@@ -1198,93 +1393,241 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             }
         }
 
-        // Avanza el smoothing del Tone para el próximo sub-bloque
         toneSm.skip (chunk);
         i0 += chunk;
     }
 
     // -------------------------------------------------------------------------
-    // 2) Oversampling (opcional) -> preset PRO (stateful) -> (downsample)
-    //    ESTÉREO "DUAL-MONO": cada lado independiente (sin cross-talk L<->R)
-    if (activePreset != nullptr && activePreset->process != nullptr)
+    // 1) PROCESO WET (con crossfade si corresponde)
+    if (!transitioning)
     {
-        if (oversampling != nullptr)
+        // A) normal: render activo “in-place”
+        renderChainA (wetBuffer, wetCh, numSamples);
+    }
+    else
+    {
+        // copiar base-prewet a wetOld y wetNew
+        wetOld.makeCopyOf (wetBuffer, true);
+        wetNew.makeCopyOf (wetBuffer, true);
+
+        const bool osChanged = (pendingOSIndex != currentOSIndex);
+
+        if (osChanged)
         {
-            juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
+            // ✅ Escenario 1: cambia OS => render A y B con oversamplers distintos, crossfade a SR base
+            renderChainA (wetOld, wetCh, numSamples);
+            renderChainB (wetNew, wetCh, numSamples);
 
-            // procesamos SOLO numSamples (aunque wetBuffer sea más grande)
-            baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
+            float* oL = wetOld.getWritePointer (0);
+            float* nL = wetNew.getWritePointer (0);
 
-            auto osBlock = oversampling->processSamplesUp (baseBlock);
+            float* outL = wetBuffer.getWritePointer (0);
 
-            const size_t osSamples = osBlock.getNumSamples();
-            const size_t osCh = osBlock.getNumChannels();
+            float* oR = (wetCh > 1) ? wetOld.getWritePointer (1) : nullptr;
+            float* nR = (wetCh > 1) ? wetNew.getWritePointer (1) : nullptr;
+            float* outR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
-            if (osCh == 2)
+            for (int i = 0; i < numSamples; ++i)
             {
-                float* L = osBlock.getChannelPointer (0);
-                float* R = osBlock.getChannelPointer (1);
+                const float t = (xfadeTotalSamples > 0)
+                              ? ((float) (xfadePosSamples + i) / (float) xfadeTotalSamples)
+                              : 1.0f;
 
-                void* stL = (void*) &presetState[0];
-                void* stR = (void*) &presetState[1];
+                const float gA = xfadeGainA (t);
+                const float gB = xfadeGainB (t);
 
-                for (size_t n = 0; n < osSamples; ++n)
-                {
-                    const float xL = L[n];
-                    const float xR = R[n];
-
-                    L[n] = activePreset->process (stL, xL);
-                    R[n] = activePreset->process (stR, xR);
-                }
-            }
-            else
-            {
-                // Mono
-                for (size_t ch = 0; ch < osCh; ++ch)
-                {
-                    float* data = osBlock.getChannelPointer (ch);
-                    void* st = (void*) &presetState[0];
-
-                    for (size_t n = 0; n < osSamples; ++n)
-                        data[n] = activePreset->process (st, data[n]);
-                }
+                outL[i] = gA * oL[i] + gB * nL[i];
+                if (wetCh > 1 && outR != nullptr && oR != nullptr && nR != nullptr)
+                    outR[i] = gA * oR[i] + gB * nR[i];
             }
 
-            oversampling->processSamplesDown (baseBlock);
+            xfadePosSamples += numSamples;
+            if (xfadePosSamples >= xfadeTotalSamples)
+                commitTransition (wetCh);
         }
         else
         {
-            // x1: sin oversampling (ahorra CPU) - DUAL MONO
-            if (wetCh >= 2 && wetR != nullptr)
-            {
-                void* stL = (void*) &presetState[0];
-                void* stR = (void*) &presetState[1];
+            // ✅ Escenario 2: mismo OS, cambia preset => 1x up, duplicar osBlock, procesar A/B, crossfade en OS domain, 1x down
+            const int osIdx = currentOSIndex;
+            auto* osPtr = (osIdx == 0 ? nullptr : oversamplers[osIdx].get());
 
-                for (int i = 0; i < numSamples; ++i)
+            if (osPtr != nullptr)
+            {
+                juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
+                baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
+
+                auto osBlockA = osPtr->processSamplesUp (baseBlock);
+                const size_t osSamples = osBlockA.getNumSamples();
+                const size_t osCh = osBlockA.getNumChannels();
+
+                // osTemp: copia exacta del osBlockA (antes de procesar)
+                if ((int) osCh <= 0)
                 {
-                    wetL[i] = activePreset->process (stL, wetL[i]);
-                    wetR[i] = activePreset->process (stR, wetR[i]);
+                    // nada
                 }
+                else
+                {
+                    if (osTemp.getNumChannels() != (int) osCh || osTemp.getNumSamples() < (int) osSamples)
+                        osTemp.setSize ((int) osCh, (int) osSamples, false, false, true);
+
+                    for (size_t ch = 0; ch < osCh; ++ch)
+                        std::memcpy (osTemp.getWritePointer ((int) ch),
+                                     osBlockA.getChannelPointer (ch),
+                                     osSamples * sizeof (float));
+                }
+
+                // procesar A sobre osBlockA
+                if (activePreset != nullptr && activePreset->process != nullptr)
+                {
+                    if (osCh >= 2 && wetCh >= 2)
+                    {
+                        float* L = osBlockA.getChannelPointer (0);
+                        float* R = osBlockA.getChannelPointer (1);
+
+                        void* stL = (void*) &getActiveStateStorage (0);
+                        void* stR = (void*) &getActiveStateStorage (1);
+
+                        for (size_t n = 0; n < osSamples; ++n)
+                        {
+                            L[n] = activePreset->process (stL, L[n]);
+                            R[n] = activePreset->process (stR, R[n]);
+                            stereoA.processSample (L[n], R[n]); // ✅
+                        }
+                    }
+                    else
+                    {
+                        float* data = osBlockA.getChannelPointer (0);
+                        void* st = (void*) &getActiveStateStorage (0);
+                        for (size_t n = 0; n < osSamples; ++n)
+                            data[n] = activePreset->process (st, data[n]);
+                    }
+                }
+
+                // procesar B sobre osTemp
+                const auto* pendingPreset = (pendingPresetIndex >= 0 && pendingPresetIndex < (int) PresetRegistry::items.size())
+                                          ? &PresetRegistry::items[(size_t) pendingPresetIndex]
+                                          : nullptr;
+
+                if (pendingPreset != nullptr && pendingPreset->process != nullptr)
+                {
+                    if (osCh >= 2 && wetCh >= 2)
+                    {
+                        float* Lb = osTemp.getWritePointer (0);
+                        float* Rb = osTemp.getWritePointer (1);
+
+                        void* stL = (void*) &getPendingStateStorage (0);
+                        void* stR = (void*) &getPendingStateStorage (1);
+
+                        for (size_t n = 0; n < osSamples; ++n)
+                        {
+                            Lb[n] = pendingPreset->process (stL, Lb[n]);
+                            Rb[n] = pendingPreset->process (stR, Rb[n]);
+                            stereoB.processSample (Lb[n], Rb[n]); // ✅
+                        }
+                    }
+                    else
+                    {
+                        float* data = osTemp.getWritePointer (0);
+                        void* st = (void*) &getPendingStateStorage (0);
+                        for (size_t n = 0; n < osSamples; ++n)
+                            data[n] = pendingPreset->process (st, data[n]);
+                    }
+                }
+
+                // crossfade oversampled domain
+                const int osFactor = (osIdx == 0 ? 1 : (1 << osIdx));
+                const float denom = (float) (juce::jmax (1, xfadeTotalSamples) * osFactor);
+
+                if (osCh >= 2 && wetCh >= 2)
+                {
+                    float* L = osBlockA.getChannelPointer (0);
+                    float* R = osBlockA.getChannelPointer (1);
+
+                    float* Lb = osTemp.getWritePointer (0);
+                    float* Rb = osTemp.getWritePointer (1);
+
+                    const int baseStart = xfadePosSamples * osFactor;
+
+                    for (size_t n = 0; n < osSamples; ++n)
+                    {
+                        const float t = (denom > 0.0f)
+                                      ? ((float) (baseStart + (int) n) / denom)
+                                      : 1.0f;
+
+                        const float gA = xfadeGainA (t);
+                        const float gB = xfadeGainB (t);
+
+                        L[n] = gA * L[n] + gB * Lb[n];
+                        R[n] = gA * R[n] + gB * Rb[n];
+                    }
+                }
+                else if (osCh >= 1)
+                {
+                    float* a = osBlockA.getChannelPointer (0);
+                    float* b = osTemp.getWritePointer (0);
+
+                    const int baseStart = xfadePosSamples * osFactor;
+
+                    for (size_t n = 0; n < osSamples; ++n)
+                    {
+                        const float t = (denom > 0.0f)
+                                      ? ((float) (baseStart + (int) n) / denom)
+                                      : 1.0f;
+
+                        const float gA = xfadeGainA (t);
+                        const float gB = xfadeGainB (t);
+
+                        a[n] = gA * a[n] + gB * b[n];
+                    }
+                }
+
+                // bajar una sola vez
+                osPtr->processSamplesDown (baseBlock);
+
+                xfadePosSamples += numSamples;
+                if (xfadePosSamples >= xfadeTotalSamples)
+                    commitTransition (wetCh);
             }
             else
             {
-                void* st = (void*) &presetState[0];
+                // x1 (sin OS): hacemos crossfade a SR base renderizando 2 cadenas (igual que escenario 1)
+                renderChainA (wetOld, wetCh, numSamples);
+                renderChainB (wetNew, wetCh, numSamples);
+
+                float* oL = wetOld.getWritePointer (0);
+                float* nL = wetNew.getWritePointer (0);
+                float* outL = wetBuffer.getWritePointer (0);
+
+                float* oR = (wetCh > 1) ? wetOld.getWritePointer (1) : nullptr;
+                float* nR = (wetCh > 1) ? wetNew.getWritePointer (1) : nullptr;
+                float* outR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
+
                 for (int i = 0; i < numSamples; ++i)
-                    wetL[i] = activePreset->process (st, wetL[i]);
+                {
+                    const float t = (xfadeTotalSamples > 0)
+                                  ? ((float) (xfadePosSamples + i) / (float) xfadeTotalSamples)
+                                  : 1.0f;
+
+                    const float gA = xfadeGainA (t);
+                    const float gB = xfadeGainB (t);
+
+                    outL[i] = gA * oL[i] + gB * nL[i];
+                    if (wetCh > 1 && outR != nullptr && oR != nullptr && nR != nullptr)
+                        outR[i] = gA * oR[i] + gB * nR[i];
+                }
+
+                xfadePosSamples += numSamples;
+                if (xfadePosSamples >= xfadeTotalSamples)
+                    commitTransition (wetCh);
             }
         }
     }
 
     // -------------------------------------------------------------------------
-    // 3) Mix + AUTO-LEVEL (volumen constante) - ULTRA (por muestra)
-
-    // ✅ 2.1) Robustecer safety:
-    // - headroom fijo antes del safety (evita que se active seguido)
-    // - clamp extra del autogain (por si se dispara)
+    // 3) Mix + AUTO-LEVEL (por muestra)
     const float safetyHeadroom = juce::Decibels::decibelsToGain (-0.9f);
     const float maxAutoGain    = juce::Decibels::decibelsToGain (+12.0f);
 
-    // ✅ 3.3) Punteros del delay (una vez por bloque, no por sample)
     auto* dL = dryDelayBuffer.getWritePointer (0);
     auto* dR = (dryDelayBuffer.getNumChannels() > 1) ? dryDelayBuffer.getWritePointer (1) : nullptr;
 
@@ -1294,31 +1637,25 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     {
         const float mix01 = mixSm.getNextValue();
 
-        // ✅ DRY retrasado/alineado con oversampling
         const int wp = dryDelayWritePos;
         int rp = wp - dryDelaySamples;
         if (rp < 0) rp += size;
 
-        // entrada actual (sin delay)
         const float inL = ch0[i];
         const float inR = (ch1 != nullptr) ? ch1[i] : inL;
 
-        // escribir entrada al delay
         dL[wp] = inL;
         if (dR != nullptr) dR[wp] = inR;
 
-        // leer dry alineado
         const float dryL = dL[rp];
         const float dryR = (dR != nullptr) ? dR[rp] : dryL;
 
-        // avanzar puntero
         dryDelayWritePos = wp + 1;
         if (dryDelayWritePos >= size) dryDelayWritePos = 0;
 
         const float wetOutL = wetL[i];
         const float wetOutR = (wetR != nullptr) ? wetR[i] : wetOutL;
 
-        // BYPASS EXACTO CUANDO MIX=0
         if (mix01 <= 1.0e-4f)
         {
             (void) autoGain.processStereo (dryL, dryR, dryL, dryR);
@@ -1331,10 +1668,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float mixedL = plugin::equalPowerMix (dryL, wetOutL, mix01);
         const float mixedR = plugin::equalPowerMix (dryR, wetOutR, mix01);
 
-        // AutoGain ULTRA: calcula ganancia desde dry vs mixed PRE gain
         const float g = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
 
-        // ✅ clamp extra del autogain + headroom antes del safety
         const float gSafe = juce::jlimit (0.0f, maxAutoGain, g);
 
         ch0[i] = plugin::softClipSafety (mixedL * gSafe * safetyHeadroom);
