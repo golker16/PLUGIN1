@@ -66,186 +66,189 @@ private:
     //     1er orden, coef ligeramente distinto L/R y ligeramente dependiente de nivel,
     //     para sensación "consola/analógica" (sin chorusing ni combs evidentes).
     struct StereoInteract
+{
+    void prepare (float sampleRateHz) noexcept
     {
-        void prepare (float sampleRateHz) noexcept
+        sr = (sampleRateHz > 1000.0f ? sampleRateHz : 192000.0f);
+
+        // envelope (nivel) ~ 12ms
+        envAlpha = alphaFromMs (12.0f);
+
+        // filtros para banda mid (aprox 350Hz..2.2kHz)
+        setMidBandHz (2200.0f, 350.0f);
+
+        // low para un poco de "glue" (más realista que fullband)
+        lowAlpha = alphaFromHz (160.0f);
+
+        // allpass micro (muy sutil)
+        apBase = 0.62f;     // 0..1, más cerca de 1 => más fase/retardo
+        apVar  = 0.010f;    // variación por nivel (muy pequeña)
+
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        envL = envR = envLR = 0.0f;
+
+        // Mid band LPs por canal (para generar band)
+        midHiLP[0] = midHiLP[1] = 0.0f;
+        midLoLP[0] = midLoLP[1] = 0.0f;
+
+        lowLP[0] = lowLP[1] = 0.0f;
+
+        // Allpass states (x1,y1) por canal
+        ap_x1[0] = ap_x1[1] = 0.0f;
+        ap_y1[0] = ap_y1[1] = 0.0f;
+    }
+
+    void setMidBandHz (float hiHz, float loHz) noexcept
+    {
+        midHiAlpha = alphaFromHz (juce::jlimit (600.0f, 6000.0f, hiHz));
+        midLoAlpha = alphaFromHz (juce::jlimit (80.0f,  1200.0f, loHz));
+    }
+
+    // Procesa IN-PLACE una muestra estéreo oversampled
+    inline void processSample (float& xL, float& xR) noexcept
+    {
+        // -------------------------
+        // 1) Nivel + correlación (para respetar distribución estéreo del input)
+        const float pL  = xL * xL;
+        const float pR  = xR * xR;
+        const float pLR = xL * xR;
+
+        envL  = envAlpha * envL  + (1.0f - envAlpha) * pL;
+        envR  = envAlpha * envR  + (1.0f - envAlpha) * pR;
+        envLR = envAlpha * envLR + (1.0f - envAlpha) * pLR;
+
+        const float pAvg = 0.5f * (envL + envR);
+        const float rms  = std::sqrt (pAvg + 1.0e-12f);
+
+        float level01 = rms * 1.25f;                  // calibración heurística
+        level01 = juce::jlimit (0.0f, 1.0f, level01);
+
+        // correlación normalizada (0 = wide/no correl, 1 = mono)
+        const float denom = std::sqrt (envL * envR + 1.0e-20f);
+        float corr = (denom > 0.0f ? (envLR / denom) : 0.0f);
+        corr = juce::jlimit (-1.0f, 1.0f, corr);
+
+        // factor de "link" (suave): crosstalk solo cuando el material es bastante correlacionado
+        const float corrAbs = std::abs (corr);
+        float t = (corrAbs - 0.20f) / (0.95f - 0.20f);
+        t = juce::jlimit (0.0f, 1.0f, t);
+        const float linked = t * t * (3.0f - 2.0f * t); // smoothstep
+
+        // amount base (muy sutil) + sube con nivel + se reduce si el input es wide
+        const float ctBase = 0.0012f;
+        const float ctMax  = 0.0032f;
+        const float ctAmt  = (ctBase + (ctMax - ctBase) * (level01 * level01)) * linked;
+
+        // -------------------------
+        // 2) Crosstalk dependiente de frecuencia
+        // midBandOther = LP_hi(other) - LP_lo(other)
+        // lowOther     = LP_low(other)
+        const float midOtherFromR = midBandFrom (xR, 1);
+        const float midOtherFromL = midBandFrom (xL, 0);
+
+        const float lowOtherFromR = lowFrom (xR, 1);
+        const float lowOtherFromL = lowFrom (xL, 0);
+
+        // pesos: más mids, un poco de lows
+        const float wMid = 1.0f;
+        const float wLow = 0.55f;
+
+        const float injL = (wMid * midOtherFromR + wLow * lowOtherFromR);
+        const float injR = (wMid * midOtherFromL + wLow * lowOtherFromL);
+
+        xL = xL + ctAmt * injL;
+        xR = xR + ctAmt * injR;
+
+        // -------------------------
+        // 3) Micro allpass (fase) con tiny diferencia L/R
+        //
+        // Para respetar el panorama original cuando el material es wide/no correlacionado,
+        // aplicamos el micro-allpass SOLO si 'linked' es suficientemente alto.
+        if (linked > 0.05f)
         {
-            sr = (sampleRateHz > 1000.0f ? sampleRateHz : 192000.0f);
+            const float apVarScaled = apVar * linked;
 
-            // envelope (nivel) ~ 12ms
-            envAlpha = alphaFromMs (12.0f);
+            float aL = apBase + apVarScaled * level01;
+            float aR = apBase - apVarScaled * level01;
 
-            // filtros para banda mid (aprox 350Hz..2.2kHz)
-            setMidBandHz (2200.0f, 350.0f);
+            aL = juce::jlimit (0.10f, 0.95f, aL);
+            aR = juce::jlimit (0.10f, 0.95f, aR);
 
-            // low para un poco de "glue" (más realista que fullband)
-            lowAlpha = alphaFromHz (160.0f);
-
-            // allpass micro (muy sutil)
-            apBase = 0.62f;     // 0..1, más cerca de 1 => más fase/retardo
-            apVar  = 0.010f;    // variación por nivel (muy pequeña)
-
-            reset();
+            xL = allpass1 (xL, 0, aL);
+            xR = allpass1 (xR, 1, aR);
         }
+    }
 
-        void reset() noexcept
-        {
-            envL = envR = envLR = 0.0f;
+private:
+    inline float alphaFromHz (float fc) const noexcept
+    {
+        constexpr float twoPi = 6.2831853071795864769f;
+        const float safeSr = (sr > 1.0f ? sr : 1.0f);
+        return std::exp (-twoPi * (fc / safeSr));
+    }
 
-            // Mid band LPs por canal (para generar band)
-            midHiLP[0] = midHiLP[1] = 0.0f;
-            midLoLP[0] = midLoLP[1] = 0.0f;
+    inline float alphaFromMs (float ms) const noexcept
+    {
+        const float tau = juce::jmax (1.0e-4f, ms * 0.001f);
+        const float safeSr = (sr > 1.0f ? sr : 1.0f);
+        return std::exp (-1.0f / (tau * safeSr));
+    }
 
-            lowLP[0] = lowLP[1] = 0.0f;
+    inline float onePoleLP (float y1, float x, float a) const noexcept
+    {
+        return (1.0f - a) * x + a * y1;
+    }
 
-            // Allpass states (x1,y1) por canal
-            ap_x1[0] = ap_x1[1] = 0.0f;
-            ap_y1[0] = ap_y1[1] = 0.0f;
-        }
+    inline float midBandFrom (float x, int ch) noexcept
+    {
+        midHiLP[ch] = onePoleLP (midHiLP[ch], x, midHiAlpha);
+        midLoLP[ch] = onePoleLP (midLoLP[ch], x, midLoAlpha);
+        return (midHiLP[ch] - midLoLP[ch]);
+    }
 
-        void setMidBandHz (float hiHz, float loHz) noexcept
-        {
-            midHiAlpha = alphaFromHz (juce::jlimit (600.0f, 6000.0f, hiHz));
-            midLoAlpha = alphaFromHz (juce::jlimit (80.0f,  1200.0f, loHz));
-        }
+    inline float lowFrom (float x, int ch) noexcept
+    {
+        lowLP[ch] = onePoleLP (lowLP[ch], x, lowAlpha);
+        return lowLP[ch];
+    }
 
-        // Procesa IN-PLACE una muestra estéreo oversampled
-        inline void processSample (float& xL, float& xR) noexcept
-        {
-            // -------------------------
-            // 1) Nivel + correlación (para respetar distribución estéreo del input)
-            const float pL  = xL * xL;
-            const float pR  = xR * xR;
-            const float pLR = xL * xR;
+    inline float allpass1 (float x, int ch, float a) noexcept
+    {
+        // 1st-order allpass:
+        // y = -a*x + x1 + a*y1
+        const float y = (-a * x) + ap_x1[ch] + (a * ap_y1[ch]);
+        ap_x1[ch] = x;
+        ap_y1[ch] = y;
+        return y;
+    }
 
-            envL  = envAlpha * envL  + (1.0f - envAlpha) * pL;
-            envR  = envAlpha * envR  + (1.0f - envAlpha) * pR;
-            envLR = envAlpha * envLR + (1.0f - envAlpha) * pLR;
+    float sr = 192000.0f;
 
-            const float pAvg = 0.5f * (envL + envR);
-            const float rms  = std::sqrt (pAvg + 1.0e-12f);
+    // Nivel
+    float envAlpha = 0.999f;
+    float envL = 0.0f;
+    float envR = 0.0f;
+    float envLR = 0.0f;
 
-            float level01 = rms * 1.25f;                  // calibración heurística
-            level01 = juce::jlimit (0.0f, 1.0f, level01);
+    // Band shaping para crosstalk
+    float midHiAlpha = 0.98f;
+    float midLoAlpha = 0.995f;
+    float lowAlpha   = 0.999f;
 
-            // correlación normalizada (0 = wide/no correl, 1 = mono)
-            const float denom = std::sqrt (envL * envR + 1.0e-20f);
-            float corr = (denom > 0.0f ? (envLR / denom) : 0.0f);
-            corr = juce::jlimit (-1.0f, 1.0f, corr);
+    float midHiLP[2] = { 0.0f, 0.0f };
+    float midLoLP[2] = { 0.0f, 0.0f };
+    float lowLP[2]   = { 0.0f, 0.0f };
 
-            // factor de "link" (suave): crosstalk solo cuando el material es bastante correlacionado
-            const float corrAbs = std::abs (corr);
-            float t = (corrAbs - 0.20f) / (0.95f - 0.20f);
-            t = juce::jlimit (0.0f, 1.0f, t);
-            const float linked = t * t * (3.0f - 2.0f * t); // smoothstep
-
-            // amount base (muy sutil) + sube con nivel + se reduce si el input es wide
-            const float ctBase = 0.0012f;
-            const float ctMax  = 0.0032f;
-            const float ctAmt  = (ctBase + (ctMax - ctBase) * (level01 * level01)) * linked;
-// -------------------------
-            // 2) Crosstalk dependiente de frecuencia
-            // midBandOther = LP_hi(other) - LP_lo(other)
-            // lowOther     = LP_low(other)
-            const float midOtherFromR = midBandFrom (xR, 1);
-            const float midOtherFromL = midBandFrom (xL, 0);
-
-            const float lowOtherFromR = lowFrom (xR, 1);
-            const float lowOtherFromL = lowFrom (xL, 0);
-
-            // pesos: más mids, un poco de lows
-            const float wMid = 1.0f;
-            const float wLow = 0.55f;
-
-            const float injL = (wMid * midOtherFromR + wLow * lowOtherFromR);
-            const float injR = (wMid * midOtherFromL + wLow * lowOtherFromL);
-
-            xL = xL + ctAmt * injL;
-            xR = xR + ctAmt * injR;
-
-            // -------------------------
-            // 3) Micro allpass (fase) con tiny diferencia L/R
-            //
-            // Para respetar el panorama original cuando el material es wide/no correlacionado,
-            // aplicamos el micro-allpass SOLO si 'linked' es suficientemente alto.
-            if (linked > 0.05f)
-            {
-                // coef base + variación por nivel (opuesta entre canales)
-                const float apVarScaled = apVar * linked;
-
-                float aL = apBase + apVarScaled * level01;
-                float aR = apBase - apVarScaled * level01;
-
-                aL = juce::jlimit (0.10f, 0.95f, aL);
-                aR = juce::jlimit (0.10f, 0.95f, aR);
-
-                xL = allpass1 (xL, 0, aL);
-                xR = allpass1 (xR, 1, aR);
-            }}
-
-    private:
-        inline float alphaFromHz (float fc) const noexcept
-        {
-            constexpr float twoPi = 6.2831853071795864769f;
-            const float safeSr = (sr > 1.0f ? sr : 1.0f);
-            return std::exp (-twoPi * (fc / safeSr));
-        }
-
-        inline float alphaFromMs (float ms) const noexcept
-        {
-            const float tau = juce::jmax (1.0e-4f, ms * 0.001f);
-            const float safeSr = (sr > 1.0f ? sr : 1.0f);
-            return std::exp (-1.0f / (tau * safeSr));
-        }
-
-        inline float onePoleLP (float y1, float x, float a) const noexcept
-        {
-            return (1.0f - a) * x + a * y1;
-        }
-
-        inline float midBandFrom (float x, int ch) noexcept
-        {
-            midHiLP[ch] = onePoleLP (midHiLP[ch], x, midHiAlpha);
-            midLoLP[ch] = onePoleLP (midLoLP[ch], x, midLoAlpha);
-            return (midHiLP[ch] - midLoLP[ch]);
-        }
-
-        inline float lowFrom (float x, int ch) noexcept
-        {
-            lowLP[ch] = onePoleLP (lowLP[ch], x, lowAlpha);
-            return lowLP[ch];
-        }
-
-        inline float allpass1 (float x, int ch, float a) noexcept
-        {
-            // 1st-order allpass:
-            // y = -a*x + x1 + a*y1
-            const float y = (-a * x) + ap_x1[ch] + (a * ap_y1[ch]);
-            ap_x1[ch] = x;
-            ap_y1[ch] = y;
-            return y;
-        }
-
-        float sr = 192000.0f;
-
-        // Nivel
-        float envAlpha = 0.999f;
-        float envL = envR = envLR = 0.0f;
-
-        // Band shaping para crosstalk
-        float midHiAlpha = 0.98f;
-        float midLoAlpha = 0.995f;
-        float lowAlpha   = 0.999f;
-
-        float midHiLP[2] = { 0.0f, 0.0f };
-        float midLoLP[2] = { 0.0f, 0.0f };
-        float lowLP[2]   = { 0.0f, 0.0f };
-
-        // Allpass
-        float apBase = 0.62f;
-        float apVar  = 0.010f;
-        float ap_x1[2] = { 0.0f, 0.0f };
-        float ap_y1[2] = { 0.0f, 0.0f };
-    };
+    // Allpass
+    float apBase = 0.62f;
+    float apVar  = 0.010f;
+    float ap_x1[2] = { 0.0f, 0.0f };
+    float ap_y1[2] = { 0.0f, 0.0f };
+};
 
     //==============================================================================
     // Parameter pointers
@@ -301,6 +304,7 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (YourPluginAudioProcessor)
 };
+
 
 
 
