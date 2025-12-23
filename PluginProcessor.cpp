@@ -403,12 +403,18 @@ public:
     void setSpriteSheet (juce::Image sheetImage, int totalFrames, int fps, int columns = 0, int rows = 0)
     {
         sheet = sheetImage;
-        numFrames = juce::jmax (1, totalFrames);
+        numFrames  = juce::jmax (1, totalFrames);
         frameIndex = 0;
+
+        // reset dims/aspect
+        frameWf = 0.0f;
+        frameHf = 0.0f;
+        frameAspect = 1.0f;
 
         if (! sheet.isValid() || sheet.getWidth() <= 0 || sheet.getHeight() <= 0)
         {
             stopTimer();
+            repaint();
             return;
         }
 
@@ -424,8 +430,14 @@ public:
 
         rowsCount = juce::jmax (1, rowsCount);
 
-        frameW = juce::jmax (1, sheet.getWidth()  / cols);
-        frameH = juce::jmax (1, sheet.getHeight() / rowsCount);
+        // ✅ floats para evitar truncado por división entera (recortes más exactos)
+        frameWf = (float) sheet.getWidth()  / (float) cols;
+        frameHf = (float) sheet.getHeight() / (float) rowsCount;
+
+        frameWf = juce::jmax (1.0f, frameWf);
+        frameHf = juce::jmax (1.0f, frameHf);
+
+        frameAspect = frameWf / frameHf;
 
         startTimerHz (juce::jmax (1, fps));
         repaint();
@@ -433,9 +445,12 @@ public:
 
     void stop() { stopTimer(); }
 
+    // ✅ expone aspect ratio real del frame para dimensionar el header en resized()
+    float getFrameAspect() const noexcept { return frameAspect; }
+
     void paint (juce::Graphics& g) override
     {
-        if (! sheet.isValid() || numFrames <= 0 || frameW <= 0 || frameH <= 0 || cols <= 0 || rowsCount <= 0)
+        if (! sheet.isValid() || numFrames <= 0 || frameWf <= 0.0f || frameHf <= 0.0f || cols <= 0 || rowsCount <= 0)
             return;
 
         g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
@@ -447,13 +462,13 @@ public:
         if (row >= rowsCount)
             return;
 
-        const int sx = col * frameW;
-        const int sy = row * frameH;
+        float sx = (float) col * frameWf;
+        float sy = (float) row * frameHf;
 
         auto b = getLocalBounds().toFloat();
-        const float ar = (float) frameW / (float) frameH;
+        const float ar = (frameAspect > 0.0001f ? frameAspect : 1.0f);
 
-        // contain dentro del componente (permitiendo agrandar/reducir)
+        // “Contain” manteniendo aspecto (centrado)
         float dw = b.getWidth();
         float dh = dw / ar;
 
@@ -466,9 +481,14 @@ public:
         const float dx = b.getX() + (b.getWidth()  - dw) * 0.5f;
         const float dy = b.getY() + (b.getHeight() - dh) * 0.5f;
 
+        // ✅ bleed fix: recorta un pelín el source para evitar que se cuele el frame vecino
+        const float bleed = juce::jmin (bleedFixPx, 0.25f * juce::jmin (frameWf, frameHf));
+        const float sw    = juce::jmax (1.0f, frameWf - 2.0f * bleed);
+        const float sh    = juce::jmax (1.0f, frameHf - 2.0f * bleed);
+
         g.drawImage (sheet,
                      dx, dy, dw, dh,
-                     (float) sx, (float) sy, (float) frameW, (float) frameH);
+                     sx + bleed, sy + bleed, sw, sh);
     }
 
 private:
@@ -489,8 +509,13 @@ private:
     int cols      = 1;
     int rowsCount = 1;
 
-    int frameW = 0;
-    int frameH = 0;
+    // ✅ floats para recorte exacto + aspect ratio
+    float frameWf      = 0.0f;
+    float frameHf      = 0.0f;
+    float frameAspect  = 1.0f;
+
+    // ✅ evita “sangrado” de frames vecinos al escalar
+    float bleedFixPx   = 0.5f;
 };
 
 //------------------------------------------------------------------------------
@@ -538,14 +563,33 @@ public:
 
         addAndMakeVisible (header);
 
-       #if PLUGIN_HAS_ASSETS
+#if PLUGIN_HAS_ASSETS
         // header_sheet.png -> sprite sheet animado (45 frames)
         {
             juce::Image sheet;
 
             if (plugin::ui::loadImageFromBinaryDataByFilename ("header_sheet.png", sheet))
             {
-                const auto [cols, rows] = plugin::ui::inferSpriteGrid (sheet, 45);
+                int cols = 0;
+                int rows = 0;
+
+                // ✅ Si tu animación es una tira (1 columna / 1 fila), forzalo para evitar inferencias raras.
+                if (sheet.getHeight() > sheet.getWidth() * 2)
+                {
+                    cols = 1;
+                    rows = 45;
+                }
+                else if (sheet.getWidth() > sheet.getHeight() * 2)
+                {
+                    cols = 45;
+                    rows = 1;
+                }
+                else
+                {
+                    const auto grid = plugin::ui::inferSpriteGrid (sheet, 45);
+                    cols = grid.first;
+                    rows = grid.second;
+                }
 
                #if JUCE_DEBUG
                 JUCE_DBG ("[HEADER] sheet=" + juce::String (sheet.getWidth()) + "x" + juce::String (sheet.getHeight())
@@ -555,7 +599,7 @@ public:
                 header.setSpriteSheet (sheet, /*totalFrames*/ 45, /*fps*/ 3, /*columns*/ cols, /*rows*/ rows);
             }
         }
-       #endif
+#endif
 
 
         // ✅ PNG encima de knobs (desde /assets -> BinaryData) SOLO si existe
@@ -632,8 +676,20 @@ public:
     {
         auto area = getLocalBounds().reduced (44);
 
-        // ✅ 1.2: Header con menos altura
-        auto headerArea = area.removeFromTop (72).reduced (6, 6);
+        // ✅ Header: se dimensiona según aspect ratio real del frame (sin deformar)
+        int headerH = 72;
+
+        const float ar = header.getFrameAspect();
+        if (ar > 0.01f)
+        {
+            // Queremos que el dibujo pueda llenar el ancho sin “letterbox”
+            headerH = juce::roundToInt ((float) area.getWidth() / ar);
+
+            // límites razonables para que no se coma toda la UI
+            headerH = juce::jlimit (56, 160, headerH);
+        }
+
+        auto headerArea = area.removeFromTop (headerH).reduced (6, 6);
         header.setBounds (headerArea);
 
         // Aire entre header y knobs
@@ -1270,5 +1326,3 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
-
-
