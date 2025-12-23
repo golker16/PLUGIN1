@@ -286,16 +286,21 @@ private:
 
 //------------------------------------------------------------------------------
 // Animated header from sprite sheet (assets/header_sheet.png)
-// - 45 frames (horizontal strip)
-// - 3 fps (very light for plugins)
+// Soporta:
+// - tira 1xN (default)
+// - grilla CxR (ej. 9x5 = 45 frames)
 class AnimatedHeader final : public juce::Component,
                              private juce::Timer
 {
 public:
-    void setSpriteSheet (juce::Image sheetImage, int framesInRow, int fps)
+    // totalFrames: cantidad total de frames (ej. 45)
+    // fps: frames por segundo
+    // columns: si es 0 -> asume tira 1xN (columns = totalFrames, rows = 1)
+    // rows: si es 0 -> calcula rows = ceil(totalFrames / columns)
+    void setSpriteSheet (juce::Image sheetImage, int totalFrames, int fps, int columns = 0, int rows = 0)
     {
         sheet = sheetImage;
-        numFrames = juce::jmax (1, framesInRow);
+        numFrames = juce::jmax (1, totalFrames);
         frameIndex = 0;
 
         if (! sheet.isValid() || sheet.getWidth() <= 0 || sheet.getHeight() <= 0)
@@ -304,8 +309,20 @@ public:
             return;
         }
 
-        frameW = juce::jmax (1, sheet.getWidth() / numFrames);
-        frameH = juce::jmax (1, sheet.getHeight());
+        // Default: tira horizontal 1xN
+        cols = (columns > 0 ? columns : numFrames);
+        cols = juce::jmax (1, cols);
+
+        // Auto rows si no lo pasan
+        if (rows > 0)
+            rowsCount = rows;
+        else
+            rowsCount = (numFrames + cols - 1) / cols; // ceil
+
+        rowsCount = juce::jmax (1, rowsCount);
+
+        frameW = juce::jmax (1, sheet.getWidth()  / cols);
+        frameH = juce::jmax (1, sheet.getHeight() / rowsCount);
 
         startTimerHz (juce::jmax (1, fps));
         repaint();
@@ -315,22 +332,25 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        if (! sheet.isValid() || numFrames <= 0 || frameW <= 0 || frameH <= 0)
+        if (! sheet.isValid() || numFrames <= 0 || frameW <= 0 || frameH <= 0 || cols <= 0 || rowsCount <= 0)
             return;
 
-        const int sx = frameIndex * frameW;
-        const int sy = 0;
+        g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
 
-        // ✅ 1.1: "contain" + ONLY REDUCE (no agrandar) + centrado
+        const int col = frameIndex % cols;
+        const int row = frameIndex / cols;
+
+        // Si el sheet tiene más celdas que frames (grilla incompleta), corta seguro
+        if (row >= rowsCount)
+            return;
+
+        const int sx = col * frameW;
+        const int sy = row * frameH;
+
         auto b = getLocalBounds().toFloat();
-
         const float ar = (float) frameW / (float) frameH;
 
-        // tamaño nativo del frame (en pixels)
-        const float nativeW = (float) frameW;
-        const float nativeH = (float) frameH;
-
-        // 1) contain dentro del componente
+        // contain dentro del componente (permitiendo agrandar/reducir)
         float dw = b.getWidth();
         float dh = dw / ar;
 
@@ -340,24 +360,12 @@ public:
             dw = dh * ar;
         }
 
-        // 2) onlyReduceInSize: si el componente es más grande, NO escales hacia arriba
-        if (dw > nativeW || dh > nativeH)
-        {
-            dw = nativeW;
-            dh = nativeH;
-        }
-
         const float dx = b.getX() + (b.getWidth()  - dw) * 0.5f;
         const float dy = b.getY() + (b.getHeight() - dh) * 0.5f;
 
-        const int dxI = juce::roundToInt (dx);
-        const int dyI = juce::roundToInt (dy);
-        const int dwI = juce::jmax (1, juce::roundToInt (dw));
-        const int dhI = juce::jmax (1, juce::roundToInt (dh));
-
         g.drawImage (sheet,
-                     dxI, dyI, dwI, dhI,
-                     sx, sy, frameW, frameH);
+                     dx, dy, dw, dh,
+                     (float) sx, (float) sy, (float) frameW, (float) frameH);
     }
 
 private:
@@ -371,8 +379,13 @@ private:
     }
 
     juce::Image sheet;
+
     int numFrames  = 1;
     int frameIndex = 0;
+
+    int cols      = 1;
+    int rowsCount = 1;
+
     int frameW = 0;
     int frameH = 0;
 };
@@ -423,13 +436,27 @@ public:
         addAndMakeVisible (header);
 
        #if PLUGIN_HAS_ASSETS
-        // header_sheet.png -> sprite sheet animado (45 frames, 3 fps)
+        // header_sheet.png -> sprite sheet animado (45 frames)
         {
+            const juce::String wantedFile = "header_sheet.png";
+            const auto candidates = plugin::ui::makeBinaryDataNameCandidates (wantedFile);
+
+            const void* data = nullptr;
             int dataSize = 0;
-            if (auto* data = BinaryData::getNamedResource ("header_sheet_png", dataSize))
+
+            for (auto name : candidates)
+            {
+                if ((data = BinaryData::getNamedResource (name.toRawUTF8(), dataSize)) != nullptr)
+                    break;
+            }
+
+            if (data != nullptr && dataSize > 0)
             {
                 auto sheet = juce::ImageCache::getFromMemory (data, dataSize);
-                header.setSpriteSheet (sheet, 45, 3);
+
+                // ✅ Caso típico: grilla 9x5 = 45
+                // Si tu sheet fuese tira 1x45, cambia a: header.setSpriteSheet (sheet, 45, 3);
+                header.setSpriteSheet (sheet, /*totalFrames*/ 45, /*fps*/ 3, /*columns*/ 9);
             }
         }
        #endif
