@@ -270,8 +270,6 @@ private:
 
     plugin::AutoGainExact autoGain;
 
-    // ✅ Nuevo: interacción estéreo PRO para oversampled
-    StereoInteract stereoInteract;
 
     double sr = 48000.0;
     float  osSr = 384000.0f; // sr * oversamplingFactor (se recalcula en prepareToPlay)
