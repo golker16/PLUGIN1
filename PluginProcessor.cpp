@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include <cstring> // std::memset
 #include <mutex>   // std::once_flag, std::call_once
+#include <limits>  // std::numeric_limits
 
 //------------------------------------------------------------------------------
 // Si CMake no define PLUGIN_HAS_ASSETS por alguna razón, no rompas el build:
@@ -69,6 +70,19 @@ static juce::StringArray makeBinaryDataNameCandidates (juce::String fileName)
     cands.addIfNotAlreadyThere ("f_" + base);
     cands.addIfNotAlreadyThere ("f_" + base.toLowerCase());
 
+    // --- variantes comunes cuando CMake/JUCE incluye el path/carpeta en el nombre ---
+    // ej: assets/header_sheet.png  -> assets_header_sheet_png
+    const auto assetsSlash = sanitize ("assets/" + fileName);
+    const auto assetsUnd   = sanitize ("assets_" + fileName);
+
+    cands.addIfNotAlreadyThere (assetsSlash);
+    cands.addIfNotAlreadyThere (assetsSlash.toLowerCase());
+    cands.addIfNotAlreadyThere ("_" + assetsSlash);
+
+    cands.addIfNotAlreadyThere (assetsUnd);
+    cands.addIfNotAlreadyThere (assetsUnd.toLowerCase());
+    cands.addIfNotAlreadyThere ("_" + assetsUnd);
+
     return cands;
 }
 
@@ -103,6 +117,95 @@ static juce::Typeface::Ptr getEmbeddedPluginTypeface()
 
     return tf;
 }
+
+#if PLUGIN_HAS_ASSETS
+
+static bool loadImageFromBinaryDataByFilename (const juce::String& wantedFile, juce::Image& outImage)
+{
+    outImage = {};
+
+    const void* data = nullptr;
+    int dataSize = 0;
+
+    // 1) intento por candidatos (incluye assets_ / assets/ por el cambio anterior)
+    {
+        const auto candidates = makeBinaryDataNameCandidates (wantedFile);
+        for (auto name : candidates)
+        {
+            if ((data = BinaryData::getNamedResource (name.toRawUTF8(), dataSize)) != nullptr)
+                break;
+        }
+    }
+
+    // 2) fallback: escanear lista real de recursos embebidos (evita “no coincide el nombre”)
+    if (data == nullptr || dataSize <= 0)
+    {
+        for (int i = 0; i < BinaryData::namedResourceListSize; ++i)
+        {
+            const juce::String resName (BinaryData::namedResourceList[i]);
+
+            // buscamos algo que contenga "header_sheet" y sea png
+            if (resName.containsIgnoreCase ("header_sheet") && resName.endsWithIgnoreCase ("_png"))
+            {
+                int sz = 0;
+                if (auto* d = BinaryData::getNamedResource (resName.toRawUTF8(), sz))
+                {
+                    data = d;
+                    dataSize = sz;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (data != nullptr && dataSize > 0)
+    {
+        outImage = juce::ImageCache::getFromMemory (data, dataSize);
+        return outImage.isValid();
+    }
+
+   #if JUCE_DEBUG
+    JUCE_DBG ("[HEADER] No se encontró recurso para '" + wantedFile + "'");
+   #endif
+    return false;
+}
+
+// Intenta inferir el grid correcto (cols/rows) usando tamaño del PNG y totalFrames.
+// Evita “se ve recortado raro” cuando el sheet no es 9x5.
+static std::pair<int, int> inferSpriteGrid (const juce::Image& sheet, int totalFrames)
+{
+    const int W = sheet.getWidth();
+    const int H = sheet.getHeight();
+
+    long long bestScore = std::numeric_limits<long long>::max();
+    int bestCols = juce::jmax (1, totalFrames);
+    int bestRows = 1;
+
+    for (int cols = 1; cols <= totalFrames; ++cols)
+    {
+        const int rows = (totalFrames + cols - 1) / cols; // ceil
+        const int fw = W / cols;
+        const int fh = H / rows;
+
+        if (fw <= 0 || fh <= 0)
+            continue;
+
+        const int rem = (W % cols) + (H % rows);          // 0 = perfecto
+        const long long area = 1LL * fw * fh;             // preferimos celdas grandes
+        const long long score = 1LL * rem * 1000000LL - area;
+
+        if (score < bestScore)
+        {
+            bestScore = score;
+            bestCols = cols;
+            bestRows = rows;
+        }
+    }
+
+    return { bestCols, bestRows };
+}
+
+#endif // PLUGIN_HAS_ASSETS
 
 }} // namespace plugin::ui
 
@@ -438,28 +541,22 @@ public:
        #if PLUGIN_HAS_ASSETS
         // header_sheet.png -> sprite sheet animado (45 frames)
         {
-            const juce::String wantedFile = "header_sheet.png";
-            const auto candidates = plugin::ui::makeBinaryDataNameCandidates (wantedFile);
+            juce::Image sheet;
 
-            const void* data = nullptr;
-            int dataSize = 0;
-
-            for (auto name : candidates)
+            if (plugin::ui::loadImageFromBinaryDataByFilename ("header_sheet.png", sheet))
             {
-                if ((data = BinaryData::getNamedResource (name.toRawUTF8(), dataSize)) != nullptr)
-                    break;
-            }
+                const auto [cols, rows] = plugin::ui::inferSpriteGrid (sheet, 45);
 
-            if (data != nullptr && dataSize > 0)
-            {
-                auto sheet = juce::ImageCache::getFromMemory (data, dataSize);
+               #if JUCE_DEBUG
+                JUCE_DBG ("[HEADER] sheet=" + juce::String (sheet.getWidth()) + "x" + juce::String (sheet.getHeight())
+                          + " grid=" + juce::String (cols) + "x" + juce::String (rows));
+               #endif
 
-                // ✅ Caso típico: grilla 9x5 = 45
-                // Si tu sheet fuese tira 1x45, cambia a: header.setSpriteSheet (sheet, 45, 3);
-                header.setSpriteSheet (sheet, /*totalFrames*/ 45, /*fps*/ 3, /*columns*/ 9);
+                header.setSpriteSheet (sheet, /*totalFrames*/ 45, /*fps*/ 3, /*columns*/ cols, /*rows*/ rows);
             }
         }
        #endif
+
 
         // ✅ PNG encima de knobs (desde /assets -> BinaryData) SOLO si existe
        #if PLUGIN_HAS_ASSETS
