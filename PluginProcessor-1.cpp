@@ -262,17 +262,19 @@ public:
         return juce::LookAndFeel_V4::getTypefaceForFont (f);
     }
 
+    // ✅ ComboBox: opción seleccionada +25%
     juce::Font getComboBoxFont (juce::ComboBox& box) override
     {
         auto f = juce::LookAndFeel_V4::getComboBoxFont (box);
-        f.setHeight (juce::jmax (6.0f, f.getHeight() * 0.5f));
+        f.setHeight (juce::jmax (6.0f, f.getHeight() * 1.25f));
         return f;
     }
 
+    // ✅ PopupMenu: opciones +25%
     juce::Font getPopupMenuFont() override
     {
         auto f = juce::LookAndFeel_V4::getPopupMenuFont();
-        f.setHeight (juce::jmax (6.0f, f.getHeight() * 0.5f));
+        f.setHeight (juce::jmax (6.0f, f.getHeight() * 1.25f));
         return f;
     }
 
@@ -489,7 +491,7 @@ public:
         , driveKnob  ("Drive")
         , toneKnob   ("Tone")
         , mixKnob    ("Mix")
-        , outputKnob ("Output") // ✅ NUEVO
+        , outputKnob ("Output")
     {
         // ✅ Aplica mi_fuente.ttf (assets) a TODO el UI heredado de este editor
         setLookAndFeel (&knobLNF);
@@ -527,7 +529,7 @@ public:
         addAndMakeVisible (driveKnob);
         addAndMakeVisible (toneKnob);
         addAndMakeVisible (mixKnob);
-        addAndMakeVisible (outputKnob); // ✅ NUEVO
+        addAndMakeVisible (outputKnob);
 
         addAndMakeVisible (header);
 
@@ -547,6 +549,7 @@ public:
        #endif
 
        #if PLUGIN_HAS_ASSETS
+        // Drive/Tone/Mix labels
         driveKnob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::drive_png, BinaryData::drive_pngSize));
         toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
@@ -555,7 +558,17 @@ public:
         mixKnob  .setLabelSlotHeights (12, 14);
         toneKnob .setLabelSlotHeights (20, 14);
 
-        // Output: sin asset, usa texto
+        // ✅ Output PNGs (on/off)
+        outputLabelOn  = juce::ImageCache::getFromMemory (BinaryData::output_png,     BinaryData::output_pngSize);
+        outputLabelOff = juce::ImageCache::getFromMemory (BinaryData::output_off_png, BinaryData::output_off_pngSize);
+
+        if (outputLabelOn.isValid())
+            outputKnob.setLabelImage (outputLabelOn);
+
+        // "igual que los otros knobs PNG"
+        outputKnob.setLabelSlotHeights (12, 14);
+       #else
+        // Sin assets: al menos conserva los slots para texto
         outputKnob.setLabelSlotHeights (12, 14);
        #endif
 
@@ -581,9 +594,20 @@ public:
         osBox.addItem ("x8", 4);
         addAndMakeVisible (osBox);
 
-        // ✅ AutoGain button
-        autoGainButton.setButtonText ("AutoGain");
+        // ✅ AutoGain: ToggleButton SOLO tick + Label aparte (texto -25%)
+        autoGainButton.setButtonText ("");
         addAndMakeVisible (autoGainButton);
+
+        autoGainLabel.setText ("AutoGain", juce::dontSendNotification);
+        autoGainLabel.setJustificationType (juce::Justification::centredLeft);
+        autoGainLabel.setInterceptsMouseClicks (false, false);
+        autoGainLabel.setLookAndFeel (&knobLNF);
+        autoGainLabel.setColour (juce::Label::textColourId, juce::Colours::white);
+
+        // tamaño actual (aprox) -> 25% más pequeño (solo letra)
+        autoGainLabel.setFont (juce::Font (juce::FontOptions (11.0f * 0.75f)));
+
+        addAndMakeVisible (autoGainLabel);
 
         // Attachments
         driveAtt   = std::make_unique<SliderAttachment>   (processor.apvts, "drive",  driveKnob.slider);
@@ -600,9 +624,10 @@ public:
         autoGainParam = processor.apvts.getRawParameterValue ("autogain");
 
         startTimerHz (30);
-        timerCallback(); // aplica estado inicial
+        timerCallback(); // aplica estado inicial (incluye PNG/enable)
 
-        setSize (820, 460);
+        // ✅ Mitad de ancho
+        setSize (410, 460);
     }
 
     ~MinimalEditor() override
@@ -615,6 +640,8 @@ public:
 
         preampBox.setLookAndFeel (nullptr);
         osBox.setLookAndFeel (nullptr);
+
+        autoGainLabel.setLookAndFeel (nullptr);
 
         driveKnob.label.setLookAndFeel (nullptr);
         toneKnob .label.setLookAndFeel (nullptr);
@@ -634,8 +661,11 @@ public:
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced (44);
+        // ✅ Margen reducido para el nuevo ancho
+        auto area = getLocalBounds().reduced (24);
 
+        // -------------------------
+        // HEADER
         int headerH = 72;
         const float ar = header.getFrameAspect();
         if (ar > 0.01f)
@@ -647,31 +677,62 @@ public:
         auto headerArea = area.removeFromTop (headerH).reduced (6, 6);
         header.setBounds (headerArea);
 
-        area.removeFromTop (16);
+        area.removeFromTop (10);
 
-        auto bottom = area.removeFromBottom (74);
+        // -------------------------
+        // BOTTOM AREA (2 filas)
+        // fila 1: preampBox (full)
+        // fila 2: osBox + AutoGain (tick + label)
+        const int bottomH = 96;
+        auto bottomArea = area.removeFromBottom (juce::jmin (bottomH, area.getHeight()));
+        bottomArea = bottomArea.reduced (0, 6);
 
-        const int knobW = 90;
-        const int knobH = 104;
-        const int gap   = 8;
+        auto preampRow = bottomArea.removeFromTop (juce::jmin (40, bottomArea.getHeight() / 2));
+        bottomArea.removeFromTop (6);
+        auto secondRow = bottomArea;
 
-        const int startX = area.getX();
-        const int y      = area.getY();
+        preampBox.setBounds (preampRow.reduced (0, 6));
 
-        driveKnob .setBounds (startX,                         y, knobW, knobH);
-        toneKnob  .setBounds (startX + (knobW + gap) * 1,     y, knobW, knobH);
-        mixKnob   .setBounds (startX + (knobW + gap) * 2,     y, knobW, knobH);
-        outputKnob.setBounds (startX + (knobW + gap) * 3,     y, knobW, knobH); // ✅ NUEVO
+        // secondRow: osBox + autogain
+        const int gap = 8;
+        auto osArea = secondRow.removeFromLeft ((int) juce::roundToInt (secondRow.getWidth() * 0.55f));
+        secondRow.removeFromLeft (gap);
+        auto agArea = secondRow;
 
-        bottom.reduce (0, 10);
+        osBox.setBounds (osArea.reduced (0, 6));
 
-        // ✅ AutoGain button a la derecha
-        auto agArea = bottom.removeFromRight (120);
-        autoGainButton.setBounds (agArea.reduced (0, 12));
+        // AutoGain: tick chico + label al lado
+        auto tickArea = agArea.removeFromLeft (26);
+        autoGainButton.setBounds (tickArea.withSizeKeepingCentre (22, 22));
+        autoGainLabel.setBounds (agArea.reduced (0, 6));
 
-        auto osArea = bottom.removeFromLeft (juce::jmax (120, bottom.getWidth() / 3));
-        osBox.setBounds (osArea.reduced (0, 12));
-        preampBox.setBounds (bottom.reduced (0, 12));
+        // -------------------------
+        // KNOB AREA (2x2)
+        auto knobArea = area;
+        const int kGap = 10;
+
+        // Divide en 2 filas
+        const int rowH = (knobArea.getHeight() - kGap) / 2;
+        auto row1 = knobArea.removeFromTop (rowH);
+        knobArea.removeFromTop (kGap);
+        auto row2 = knobArea;
+
+        // Cada fila en 2 columnas
+        const int colW1 = (row1.getWidth() - kGap) / 2;
+        auto r1c1 = row1.removeFromLeft (colW1);
+        row1.removeFromLeft (kGap);
+        auto r1c2 = row1;
+
+        const int colW2 = (row2.getWidth() - kGap) / 2;
+        auto r2c1 = row2.removeFromLeft (colW2);
+        row2.removeFromLeft (kGap);
+        auto r2c2 = row2;
+
+        // Aplicar bounds (un poco de padding dentro de cada celda)
+        driveKnob .setBounds (r1c1.reduced (8, 4));
+        toneKnob  .setBounds (r1c2.reduced (8, 4));
+        mixKnob   .setBounds (r2c1.reduced (8, 4));
+        outputKnob.setBounds (r2c2.reduced (8, 4));
     }
 
 private:
@@ -681,6 +742,24 @@ private:
 
         outputKnob.setEnabled (!agOn);
         outputKnob.setAlpha (agOn ? 0.35f : 1.0f);
+
+        // ✅ Cambiar PNG solo cuando cambia el estado (no 30 veces/seg)
+        if (agOn != lastAgOn)
+        {
+           #if PLUGIN_HAS_ASSETS
+            if (agOn)
+            {
+                if (outputLabelOff.isValid())
+                    outputKnob.setLabelImage (outputLabelOff);
+            }
+            else
+            {
+                if (outputLabelOn.isValid())
+                    outputKnob.setLabelImage (outputLabelOn);
+            }
+           #endif
+            lastAgOn = agOn;
+        }
     }
 
 private:
@@ -697,9 +776,12 @@ private:
     plugin::ui::LabeledKnob driveKnob;
     plugin::ui::LabeledKnob toneKnob;
     plugin::ui::LabeledKnob mixKnob;
-    plugin::ui::LabeledKnob outputKnob; // ✅ NUEVO
+    plugin::ui::LabeledKnob outputKnob;
 
-    juce::ToggleButton autoGainButton;   // ✅ NUEVO
+    juce::ToggleButton autoGainButton;
+
+    // ✅ AutoGain texto separado (más pequeño)
+    juce::Label autoGainLabel;
 
     juce::ComboBox preampBox;
     juce::ComboBox osBox;
@@ -709,6 +791,10 @@ private:
     std::unique_ptr<ButtonAttachment> autoGainAtt;
 
     std::atomic<float>* autoGainParam = nullptr;
+
+    // ✅ Output label PNGs y flag de estado
+    juce::Image outputLabelOn, outputLabelOff;
+    bool lastAgOn = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MinimalEditor)
 };
@@ -720,3 +806,4 @@ juce::AudioProcessorEditor* YourPluginAudioProcessor::createEditor()
 {
     return new MinimalEditor (*this);
 }
+
