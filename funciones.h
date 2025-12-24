@@ -445,13 +445,26 @@ private:
 namespace ui
 {
 
+//------------------------------------------------------------------------------
+// ✅ Declaración: esta función está implementada en tu PluginProcessor-1.cpp
+// (o donde la hayas definido) y devuelve la fuente embebida desde BinaryData.
+//
+// Importante: la declaramos aquí para que GlobalFontLookAndFeel use EXACTAMENTE
+// la misma fuente que ya te funciona en los knobs.
+juce::Typeface::Ptr getEmbeddedPluginTypeface();
+
 //==============================================================================
 // GlobalFontLookAndFeel (JUCE 8 compatible)
 struct GlobalFontLookAndFeel : juce::LookAndFeel_V4
 {
     GlobalFontLookAndFeel()
     {
-        customTypeface = loadTypefaceFromAssets();
+        // ✅ 1) Intenta usar la MISMA fuente embebida "oficial"
+        customTypeface = getEmbeddedPluginTypeface();
+
+        // ✅ 2) Fallback robusto: tu loader por macros + scan
+        if (customTypeface == nullptr)
+            customTypeface = loadTypefaceFromAssets();
     }
 
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font& f) override
