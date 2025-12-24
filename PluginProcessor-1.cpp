@@ -559,8 +559,9 @@ public:
         toneKnob .setLabelSlotHeights (20, 14);
 
         // ✅ Output PNGs (on/off)
-        outputLabelOn  = juce::ImageCache::getFromMemory (BinaryData::output_png,     BinaryData::output_pngSize);
-        outputLabelOff = juce::ImageCache::getFromMemory (BinaryData::output_off_png, BinaryData::output_off_pngSize);
+        plugin::ui::loadImageFromBinaryDataByFilename ("output.png",     outputLabelOn);
+        plugin::ui::loadImageFromBinaryDataByFilename ("output_off.png", outputLabelOff);
+
 
         if (outputLabelOn.isValid())
             outputKnob.setLabelImage (outputLabelOn);
