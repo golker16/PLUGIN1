@@ -244,6 +244,10 @@ public:
     {
         typeface = plugin::ui::getEmbeddedPluginTypeface();
 
+        // ✅ Fuerza la fuente embebida como default global (para TODO el texto)
+        if (typeface != nullptr)
+            juce::LookAndFeel::setDefaultSansSerifTypeface (typeface);
+
         setColour (juce::ComboBox::backgroundColourId, juce::Colours::black);
         setColour (juce::ComboBox::textColourId,       juce::Colours::white);
         setColour (juce::ComboBox::arrowColourId,      juce::Colours::white);
@@ -806,5 +810,6 @@ juce::AudioProcessorEditor* YourPluginAudioProcessor::createEditor()
 {
     return new MinimalEditor (*this);
 }
+
 
 
