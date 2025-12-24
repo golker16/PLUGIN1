@@ -297,18 +297,6 @@ private:
 
 //==============================================================================
 // AutoGainExact (v3 ULTRA): iguala "volumen percibido" (RMS con HP) por MUESTRA.
-//
-// Objetivo: que el volumen se mantenga constante al mover cualquier knob, incluso con
-// tamaños de buffer variables (FL Studio, etc.). Este modo NO depende del block-size:
-// - Mide potencia (HP) de ENTRADA (dry alineado) y SALIDA (mixed PRE gain).
-// - Mantiene envs RMS (EMA) con ventana configurable (ms).
-// - Calcula targetGain = sqrt(inEnv/outEnv) con gate + clamp.
-// - Suaviza la ganancia con attack/release por muestra.
-// - Cuando no hay señal útil, vuelve lentamente a unity.
-//
-// Nota importante:
-//   La medición de salida debe hacerse ANTES de aplicar la ganancia compensatoria
-//   para evitar "auto-cancelación".
 class AutoGainExact
 {
 public:
@@ -316,32 +304,11 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-        // Rango amplio para que realmente compense presets/drive agresivos
         setClampDb (-60.0f, +24.0f);
-
-        // ✅ Ajustes "full tiempo real" (más reactivo):
-        // - gate más bajo para no "esperar" a que el RMS suba
-        // - ventana de medición mucho más corta (el 'momento' que sentías venía de aquí)
-        // - smoothing de ganancia rápido (sube/baja en pocos ms)
-        //
-        // Nota: estos valores son deliberadamente agresivos.
-        // Si llegas a oír bombeo en material muy dinámico, sube measurementWindowMs
-        // a 20–40ms y/o releaseMs a 10–30ms.
         setGateDb  (-90.0f);
-
-        // Ventana de medición (RMS EMA).
-        // 12ms ≈ comportamiento prácticamente instantáneo sin depender del tamaño de bloque.
         setMeasurementWindowMs (12.0f);
-
-        // Suavizado de la GANANCIA (no de la medición):
-        // attack: baja rápido cuando el preset/drive sube nivel
-        // release: sube rápido para mantener el nivel constante
         setGainSmoothingMs (0.30f, 6.0f);
-
-        // Vuelve a unity en silencio (más rápido, evita quedarse "pegado")
         setReturnToUnityMs (220.0f);
-
-        // HP para no dejar que DC/subgrave dicte el autogain
         setMeasureHighpassHz (70.0f);
 
         reset();
@@ -363,7 +330,6 @@ public:
 
     float getGain() const noexcept { return compGain; }
 
-    // Procesa una muestra estéreo y devuelve la ganancia ACTUAL (ya suavizada)
     inline float processStereo (float dryL, float dryR, float outLpre, float outRpre) noexcept
     {
         const float inL  = measureHP (dryL,    0, in_hp_x1,  in_hp_y1);
@@ -374,7 +340,6 @@ public:
         const float pIn  = 0.5f * (inL  * inL  + inR  * inR);
         const float pOut = 0.5f * (outL * outL + outR * outR);
 
-        // RMS envs
         inEnv  = measAlpha * inEnv  + (1.0f - measAlpha) * pIn;
         outEnv = measAlpha * outEnv + (1.0f - measAlpha) * pOut;
 
@@ -389,7 +354,6 @@ public:
         }
         else
         {
-            // vuelve a unity cuando no hay señal útil
             targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
         }
 
@@ -400,7 +364,6 @@ public:
         return compGain;
     }
 
-    // --- ajustes ---
     void setClampDb (float minDb, float maxDb)
     {
         minGain = juce::Decibels::decibelsToGain (minDb);
@@ -445,7 +408,6 @@ private:
 
     inline float measureHP (float x, int ch, float* x1, float* y1) noexcept
     {
-        // 1-pole HP: y[n] = a*(y[n-1] + x[n] - x[n-1])
         const float y = hpA * (y1[ch] + x - x1[ch]);
         x1[ch] = x;
         y1[ch] = y;
@@ -483,18 +445,8 @@ private:
 namespace ui
 {
 
-
 //==============================================================================
 // GlobalFontLookAndFeel (JUCE 8 compatible)
-//
-// Permite forzar una fuente embebida (TTF/OTF) para TODO el texto del plugin,
-// incluyendo:
-// - Labels
-// - ComboBox (texto y popup menu)
-// - PopupMenu (items de menús plegables)
-//
-// En JUCE 8 ya NO existe Font::setTypefacePtr(), así que el método correcto
-// es devolver el Typeface desde getTypefaceForFont().
 struct GlobalFontLookAndFeel : juce::LookAndFeel_V4
 {
     GlobalFontLookAndFeel()
@@ -530,6 +482,7 @@ private:
         return out;
     }
 
+    // ✅ Reemplazado por tu versión robusta + fallback scan
     static juce::Typeface::Ptr loadTypefaceFromAssets()
     {
        #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
@@ -537,16 +490,35 @@ private:
         if (fontFile.isEmpty())
             return {};
 
-        const auto base = sanitizeResourceName (fontFile);
+        // Ej: "mi_fuente.ttf"
+        const auto sanitizedFull = sanitizeResourceName (fontFile); // "mi_fuente_ttf"
 
-        // BinaryData suele usar nombres "sanitizados" y a veces con prefijos.
+        // También probamos sin extensión + con sufijos típicos
+        juce::String baseNoExt = fontFile.upToLastOccurrenceOf (".", false, false);
+        if (baseNoExt.isEmpty())
+            baseNoExt = fontFile;
+
+        const auto sanitizedNoExt = sanitizeResourceName (baseNoExt);
+
         juce::StringArray candidates;
-        candidates.add (base);
-        candidates.add ("_" + base);
-        candidates.add ("f_" + base);
-        candidates.add (base.toLowerCase());
-        candidates.add ("_" + base.toLowerCase());
-        candidates.add ("f_" + base.toLowerCase());
+
+        // Candidatos más comunes (JUCE/CMake suelen generar algo tipo mi_fuente_ttf)
+        candidates.add (sanitizedFull);
+        candidates.add ("_" + sanitizedFull);
+        candidates.add ("f_" + sanitizedFull);
+
+        // Si PLUGIN_PRIMARY_FONT_FILENAME vino sin extensión, probamos sufijos
+        candidates.add (sanitizedNoExt + "_ttf");
+        candidates.add (sanitizedNoExt + "_otf");
+        candidates.add ("_" + sanitizedNoExt + "_ttf");
+        candidates.add ("_" + sanitizedNoExt + "_otf");
+
+        // Variantes lower
+        candidates.add (sanitizedFull.toLowerCase());
+        candidates.add ("_" + sanitizedFull.toLowerCase());
+        candidates.add ("f_" + sanitizedFull.toLowerCase());
+        candidates.add ((sanitizedNoExt + "_ttf").toLowerCase());
+        candidates.add ((sanitizedNoExt + "_otf").toLowerCase());
 
         for (auto name : candidates)
         {
@@ -557,7 +529,29 @@ private:
                     return juce::Typeface::createSystemTypefaceFor (data, (size_t) dataSize);
             }
         }
+
+        // Fallback: escanea TODOS los recursos y agarra el primero que parezca la fuente
+        // (esto ayuda cuando el nombre real en BinaryData no coincide con tus macros)
+        for (int i = 0; i < BinaryData::namedResourceListSize; ++i)
+        {
+            const juce::String resName (BinaryData::namedResourceList[i]);
+
+            const bool looksLikeFont =
+                resName.containsIgnoreCase (sanitizedNoExt) &&
+                (resName.containsIgnoreCase ("ttf") || resName.containsIgnoreCase ("otf"));
+
+            if (! looksLikeFont)
+                continue;
+
+            int dataSize = 0;
+            if (auto* data = BinaryData::getNamedResource (resName.toRawUTF8(), dataSize))
+            {
+                if (dataSize > 0)
+                    return juce::Typeface::createSystemTypefaceFor (data, (size_t) dataSize);
+            }
+        }
        #endif
+
         return {};
     }
 
@@ -614,9 +608,9 @@ struct LabeledKnob : juce::Component
     juce::Image labelImage;
     juce::ImageComponent imageComp;
 
-    // ✅ defaults ajustados: PNG más pegado y alineación consistente
-    int pngTopH  = 12;   // antes 16
-    int textTopH = 14;   // se mantiene
+    // ✅ Dejar defaults como estaban (para no reescalar raro el PNG)
+    int pngTopH  = 16;
+    int textTopH = 14;
 
     explicit LabeledKnob (const juce::String& name)
     {
@@ -639,7 +633,6 @@ struct LabeledKnob : juce::Component
         addAndMakeVisible (slider);
     }
 
-    // ✅ 2.1: setter para controlar alto del "slot" por knob
     void setLabelSlotHeights (int pngTop, int textTop)
     {
         pngTopH  = juce::jlimit (6, 48, pngTop);
@@ -648,7 +641,6 @@ struct LabeledKnob : juce::Component
         repaint();
     }
 
-    // Pone un PNG encima del knob
     void setLabelImage (juce::Image img)
     {
         labelImage = img;
@@ -665,17 +657,14 @@ struct LabeledKnob : juce::Component
         }
         else
         {
-            imageComp.setImage (juce::Image()); // limpia
+            imageComp.setImage (juce::Image());
         }
 
         resized();
         repaint();
     }
 
-    // ✅ IMPLEMENTACIÓN pedida:
-    // - knob 25% más chico
-    // - PNG/label más pegado al knob
-    // - lógica consistente para que queden alineados
+    // ✅ Reemplazado por el resized() que pediste (baseline + 0.75 real, gap 1px, PNG sin reduced)
     void resized() override
     {
         auto r = getLocalBounds();
@@ -683,26 +672,28 @@ struct LabeledKnob : juce::Component
         const bool hasImg = imageComp.isVisible();
         const int topH = hasImg ? pngTopH : textTopH;
 
-        // Zona superior (PNG o texto)
+        // 1) Slot superior (PNG o texto)
         auto top = r.removeFromTop (topH);
 
         if (hasImg)
-            imageComp.setBounds (top.reduced (1, 1));   // menos padding => más pegado
+            imageComp.setBounds (top);              // <-- NO lo reduzco: no lo agranda ni lo deforma
         else
             label.setBounds (top);
 
-        // Gap mínimo entre label y knob (antes era enorme por el reduced(16,14))
-        r.removeFromTop (2);
+        // 2) Gap mínimo (PEGADO al knob)
+        r.removeFromTop (1);                        // <-- casi pegado
 
-        // Knob 25% más chico (0.75x), pero alineado y centrado en X
-        auto knobArea = r;
-        const int maxSide = juce::jmin (knobArea.getWidth(), knobArea.getHeight());
-        const int side    = juce::jmax (10, juce::roundToInt (maxSide * 0.75f));
+        // 3) Mantén tu "baseline" anterior para el knob (esto es clave)
+        auto knobBase = r.reduced (16, 14);
 
-        // Lo “pegamos” más arriba (cerca del label) y lo centramos horizontalmente
+        // 4) ...y recién ahí lo hacemos 25% más chico (0.75x)
+        const int baseSide = juce::jmin (knobBase.getWidth(), knobBase.getHeight());
+        const int side     = juce::jmax (10, juce::roundToInt (baseSide * 0.75f));
+
+        // 5) Alineación: centrado en X y "pegado arriba" dentro de knobBase
         auto knobBounds = juce::Rectangle<int> (0, 0, side, side)
-                            .withCentre (juce::Point<int> (knobArea.getCentreX(),
-                                                           knobArea.getY() + side / 2));
+                            .withCentre (juce::Point<int> (knobBase.getCentreX(),
+                                                           knobBase.getY() + side / 2));
 
         slider.setBounds (knobBounds);
     }
@@ -711,5 +702,6 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
+
 
 
