@@ -273,9 +273,8 @@ public:
     {
         typeface = plugin::ui::getEmbeddedPluginTypeface();
 
-        // ✅ Fuerza la fuente embebida como default global (para TODO el texto)
-        if (typeface != nullptr)
-            juce::LookAndFeel::setDefaultSansSerifTypeface (typeface);
+        // ✅ CAMBIO: QUITADO setDefaultSansSerifTypeface global (no cubre todo y puede afectar al host)
+        // El knob y componentes con este LNF seguirán usando la fuente por getTypefaceForFont() override.
 
         setColour (juce::ComboBox::backgroundColourId, juce::Colours::black);
         setColour (juce::ComboBox::textColourId,       juce::Colours::white);
@@ -528,6 +527,18 @@ public:
         , mixKnob    ("Mix")
         , outputKnob ("Output")
     {
+        // ✅ CAMBIO: LookAndFeel default global SOLO mientras el editor vive
+        // Fuente global para TODO lo que JUCE crea fuera del árbol de hijos
+        // (PopupMenu/ComboBox, CallOutBox, BubbleMessage, TooltipWindow, etc).
+        // Importante en plugins: lo activamos solo mientras el editor vive,
+        // y lo restauramos en el destructor para no afectar al host.
+        if (auto* current = &juce::LookAndFeel::getDefaultLookAndFeel();
+            current != &globalFontLnf)
+        {
+            previousDefaultLnf = current;
+            juce::LookAndFeel::setDefaultLookAndFeel (&globalFontLnf);
+        }
+
         // ✅ Aplica mi_fuente.ttf (assets) a TODO el UI heredado de este editor
         setLookAndFeel (&knobLNF);
 
@@ -670,6 +681,10 @@ public:
         stopTimer();
         header.stop();
 
+        // ✅ CAMBIO: Restaura el LookAndFeel global del host
+        if (previousDefaultLnf != nullptr)
+            juce::LookAndFeel::setDefaultLookAndFeel (previousDefaultLnf);
+
         // Importante: evitar punteros colgantes (knobLNF vive como miembro)
         setLookAndFeel (nullptr);
 
@@ -806,6 +821,10 @@ private:
 
     KnobLNF knobLNF;
 
+    // ✅ CAMBIO: miembros para LookAndFeel default global (solo durante vida del editor)
+    plugin::ui::GlobalFontLookAndFeel globalFontLnf;
+    juce::LookAndFeel* previousDefaultLnf = nullptr;
+
     AnimatedHeader header;
 
     plugin::ui::LabeledKnob driveKnob;
@@ -841,6 +860,7 @@ juce::AudioProcessorEditor* YourPluginAudioProcessor::createEditor()
 {
     return new MinimalEditor (*this);
 }
+
 
 
 
