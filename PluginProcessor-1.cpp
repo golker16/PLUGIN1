@@ -23,42 +23,45 @@
 #if PLUGIN_HAS_ASSETS && PLUGIN_HAS_FONT
  #ifndef PLUGIN_PRIMARY_FONT_FILENAME
   #define PLUGIN_PRIMARY_FONT_FILENAME ""
- #endif
+ # endif
 #endif
 
 namespace plugin { namespace ui {
+
+//------------------------------------------------------------------------------
+// Helper común para "sanitizar" nombres al estilo BinaryData
+static juce::String sanitizeBinaryDataName (juce::String s)
+{
+    s = s.trim();
+    s = s.replaceCharacter ('.', '_')
+         .replaceCharacter ('-', '_')
+         .replaceCharacter (' ', '_');
+
+    juce::String out;
+    out.preallocateBytes ((size_t) s.getNumBytesAsUTF8());
+
+    for (auto c : s)
+    {
+        if (juce::CharacterFunctions::isLetterOrDigit (c) || c == '_')
+            out += juce::String::charToString ((juce::juce_wchar) c);
+        else
+            out += "_";
+    }
+
+    // JUCE a veces prefija '_' si el nombre no puede ser un identificador C++
+    if (out.isNotEmpty() && ! (juce::CharacterFunctions::isLetter (out[0]) || out[0] == '_'))
+        out = "_" + out;
+
+    return out;
+}
 
 static juce::StringArray makeBinaryDataNameCandidates (juce::String fileName)
 {
     // fileName: solo nombre (ej. "MiFuente.ttf")
     fileName = fileName.trim();
 
-    auto sanitize = [] (juce::String s)
-    {
-        s = s.replaceCharacter ('.', '_')
-             .replaceCharacter ('-', '_')
-             .replaceCharacter (' ', '_');
-
-        juce::String out;
-        out.preallocateBytes ((size_t) s.getNumBytesAsUTF8());
-
-        for (auto c : s)
-        {
-            if (juce::CharacterFunctions::isLetterOrDigit (c) || c == '_')
-                out += juce::String::charToString ((juce::juce_wchar) c);
-            else
-                out += "_";
-        }
-
-        // JUCE a veces prefija '_' si el nombre no puede ser un identificador C++
-        if (out.isNotEmpty() && ! (juce::CharacterFunctions::isLetter (out[0]) || out[0] == '_'))
-            out = "_" + out;
-
-        return out;
-    };
-
     juce::StringArray cands;
-    const auto base = sanitize (fileName);
+    const auto base = sanitizeBinaryDataName (fileName);
 
     // variantes comunes (case + prefijos)
     cands.addIfNotAlreadyThere (base);
@@ -73,8 +76,8 @@ static juce::StringArray makeBinaryDataNameCandidates (juce::String fileName)
 
     // --- variantes comunes cuando CMake/JUCE incluye el path/carpeta en el nombre ---
     // ej: assets/header_sheet.png  -> assets_header_sheet_png
-    const auto assetsSlash = sanitize ("assets/" + fileName);
-    const auto assetsUnd   = sanitize ("assets_" + fileName);
+    const auto assetsSlash = sanitizeBinaryDataName ("assets/" + fileName);
+    const auto assetsUnd   = sanitizeBinaryDataName ("assets_" + fileName);
 
     cands.addIfNotAlreadyThere (assetsSlash);
     cands.addIfNotAlreadyThere (assetsSlash.toLowerCase());
@@ -114,6 +117,31 @@ juce::Typeface::Ptr getEmbeddedPluginTypeface()
                 break;
             }
         }
+
+        // ---------------------------------------------------------------------
+        // (E) Fallback robusto: escanear BinaryData::namedResourceList
+        //     para sobrevivir a cambios de "sanitizado" / prefijos de CMake/JUCE.
+        // ---------------------------------------------------------------------
+        if (tf == nullptr)
+        {
+            const auto base = sanitizeBinaryDataName (fontFile); // "MiFuente_ttf" etc
+
+            for (int i = 0; i < BinaryData::namedResourceListSize; ++i)
+            {
+                const juce::String resName (BinaryData::namedResourceList[i]);
+
+                if (resName.containsIgnoreCase (base)
+                    && (resName.endsWithIgnoreCase ("_ttf") || resName.endsWithIgnoreCase ("_otf")))
+                {
+                    int dataSize = 0;
+                    if (auto* data = BinaryData::getNamedResource (resName.toRawUTF8(), dataSize))
+                    {
+                        tf = juce::Typeface::createSystemTypefaceFor (data, (size_t) dataSize);
+                        break;
+                    }
+                }
+            }
+        }
     }
    #endif
 
@@ -129,7 +157,7 @@ static bool loadImageFromBinaryDataByFilename (const juce::String& wantedFile, j
     const void* data = nullptr;
     int dataSize = 0;
 
-    // 1) intento por candidatos (incluye assets_ / assets/ por el cambio anterior)
+    // 1) intento por candidatos (incluye assets_ / assets/)
     {
         const auto candidates = makeBinaryDataNameCandidates (wantedFile);
         for (auto name : candidates)
@@ -139,7 +167,8 @@ static bool loadImageFromBinaryDataByFilename (const juce::String& wantedFile, j
         }
     }
 
-    // 2) fallback: escanear lista real de recursos embebidos (evita “no coincide el nombre”)
+    // 2) fallback (actual): scan simple (dejado igual que tu versión actual)
+    //    *Ojo*: hoy está hardcodeado para header_sheet. Lo dejamos tal cual.
     if (data == nullptr || dataSize <= 0)
     {
         for (int i = 0; i < BinaryData::namedResourceListSize; ++i)
@@ -259,10 +288,12 @@ public:
         setColour (juce::PopupMenu::highlightedTextColourId,       juce::Colours::white);
     }
 
+    // (D) ✅ Forzar typeface desde el LookAndFeel (robusto)
     juce::Typeface::Ptr getTypefaceForFont (const juce::Font& f) override
     {
         if (typeface != nullptr)
             return typeface;
+
         return juce::LookAndFeel_V4::getTypefaceForFont (f);
     }
 
@@ -562,8 +593,8 @@ public:
         mixKnob  .setLabelSlotHeights (12, 14);
         toneKnob .setLabelSlotHeights (20, 14);
 
-        // ✅ Output PNGs (on/off)
-        plugin::ui::loadImageFromBinaryDataByFilename ("output.png",     outputLabelOn);
+        // (C) ✅ Output PNGs (on/off) - nombre correcto
+        plugin::ui::loadImageFromBinaryDataByFilename ("output_on.png",  outputLabelOn);
         plugin::ui::loadImageFromBinaryDataByFilename ("output_off.png", outputLabelOff);
 
         if (outputLabelOn.isValid())
@@ -608,8 +639,8 @@ public:
         autoGainLabel.setLookAndFeel (&knobLNF);
         autoGainLabel.setColour (juce::Label::textColourId, juce::Colours::white);
 
-        // ✅ 50% más grande (1.5x)
-        autoGainLabel.setFont (juce::Font (juce::FontOptions (11.0f * 1.5f)));
+        // (A) ✅ AutoGain 15% más chico (sobre el tamaño actual 1.5x)
+        autoGainLabel.setFont (juce::Font (juce::FontOptions (11.0f * 1.5f * 0.85f)));
 
         addAndMakeVisible (autoGainLabel);
 
@@ -630,8 +661,8 @@ public:
         startTimerHz (30);
         timerCallback(); // aplica estado inicial (incluye PNG/enable)
 
-        // ✅ Un poco más alto (solo lo necesario)
-        setSize (410, 480);
+        // (B) ✅ Un poco más alto (solo lo necesario) para que no se achiquen knobs
+        setSize (410, 560);
     }
 
     ~MinimalEditor() override
