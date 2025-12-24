@@ -807,3 +807,4 @@ juce::AudioProcessorEditor* YourPluginAudioProcessor::createEditor()
     return new MinimalEditor (*this);
 }
 
+
