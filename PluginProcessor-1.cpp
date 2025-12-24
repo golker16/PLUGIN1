@@ -491,6 +491,9 @@ public:
         , mixKnob    ("Mix")
         , outputKnob ("Output") // ✅ NUEVO
     {
+        // ✅ Aplica mi_fuente.ttf (assets) a TODO el UI heredado de este editor
+        setLookAndFeel (&knobLNF);
+
         // Look & Feel knobs
         driveKnob.slider.setLookAndFeel (&knobLNF);
         toneKnob .slider.setLookAndFeel (&knobLNF);
@@ -606,6 +609,9 @@ public:
     {
         stopTimer();
         header.stop();
+
+        // Importante: evitar punteros colgantes (knobLNF vive como miembro)
+        setLookAndFeel (nullptr);
 
         preampBox.setLookAndFeel (nullptr);
         osBox.setLookAndFeel (nullptr);
