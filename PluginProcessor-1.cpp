@@ -262,19 +262,19 @@ public:
         return juce::LookAndFeel_V4::getTypefaceForFont (f);
     }
 
-    // ✅ ComboBox: opción seleccionada +25%
+    // ✅ ComboBox: opción seleccionada -25% (0.75x)
     juce::Font getComboBoxFont (juce::ComboBox& box) override
     {
         auto f = juce::LookAndFeel_V4::getComboBoxFont (box);
-        f.setHeight (juce::jmax (6.0f, f.getHeight() * 1.25f));
+        f.setHeight (juce::jmax (6.0f, f.getHeight() * 0.75f));
         return f;
     }
 
-    // ✅ PopupMenu: opciones +25%
+    // ✅ PopupMenu: opciones -25% (0.75x)
     juce::Font getPopupMenuFont() override
     {
         auto f = juce::LookAndFeel_V4::getPopupMenuFont();
-        f.setHeight (juce::jmax (6.0f, f.getHeight() * 1.25f));
+        f.setHeight (juce::jmax (6.0f, f.getHeight() * 0.75f));
         return f;
     }
 
@@ -562,7 +562,6 @@ public:
         plugin::ui::loadImageFromBinaryDataByFilename ("output.png",     outputLabelOn);
         plugin::ui::loadImageFromBinaryDataByFilename ("output_off.png", outputLabelOff);
 
-
         if (outputLabelOn.isValid())
             outputKnob.setLabelImage (outputLabelOn);
 
@@ -595,7 +594,7 @@ public:
         osBox.addItem ("x8", 4);
         addAndMakeVisible (osBox);
 
-        // ✅ AutoGain: ToggleButton SOLO tick + Label aparte (texto -25%)
+        // ✅ AutoGain: ToggleButton SOLO tick + Label aparte
         autoGainButton.setButtonText ("");
         addAndMakeVisible (autoGainButton);
 
@@ -605,8 +604,8 @@ public:
         autoGainLabel.setLookAndFeel (&knobLNF);
         autoGainLabel.setColour (juce::Label::textColourId, juce::Colours::white);
 
-        // tamaño actual (aprox) -> 25% más pequeño (solo letra)
-        autoGainLabel.setFont (juce::Font (juce::FontOptions (11.0f * 0.75f)));
+        // ✅ 50% más grande (1.5x)
+        autoGainLabel.setFont (juce::Font (juce::FontOptions (11.0f * 1.5f)));
 
         addAndMakeVisible (autoGainLabel);
 
@@ -627,8 +626,8 @@ public:
         startTimerHz (30);
         timerCallback(); // aplica estado inicial (incluye PNG/enable)
 
-        // ✅ Mitad de ancho
-        setSize (410, 460);
+        // ✅ Un poco más alto (solo lo necesario)
+        setSize (410, 480);
     }
 
     ~MinimalEditor() override
@@ -729,11 +728,11 @@ public:
         row2.removeFromLeft (kGap);
         auto r2c2 = row2;
 
-        // Aplicar bounds (un poco de padding dentro de cada celda)
-        driveKnob .setBounds (r1c1.reduced (8, 4));
-        toneKnob  .setBounds (r1c2.reduced (8, 4));
-        mixKnob   .setBounds (r2c1.reduced (8, 4));
-        outputKnob.setBounds (r2c2.reduced (8, 4));
+        // ✅ más “aire” útil (menos padding) para que no queden mini
+        driveKnob .setBounds (r1c1.reduced (4, 2));
+        toneKnob  .setBounds (r1c2.reduced (4, 2));
+        mixKnob   .setBounds (r2c1.reduced (4, 2));
+        outputKnob.setBounds (r2c2.reduced (4, 2));
     }
 
 private:
@@ -781,7 +780,7 @@ private:
 
     juce::ToggleButton autoGainButton;
 
-    // ✅ AutoGain texto separado (más pequeño)
+    // ✅ AutoGain texto separado
     juce::Label autoGainLabel;
 
     juce::ComboBox preampBox;
