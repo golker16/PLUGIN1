@@ -614,9 +614,9 @@ struct LabeledKnob : juce::Component
     juce::Image labelImage;
     juce::ImageComponent imageComp;
 
-    // ✅ 2.1: alturas configurables por instancia
-    int pngTopH  = 16;
-    int textTopH = 14;
+    // ✅ defaults ajustados: PNG más pegado y alineación consistente
+    int pngTopH  = 12;   // antes 16
+    int textTopH = 14;   // se mantiene
 
     explicit LabeledKnob (const juce::String& name)
     {
@@ -642,7 +642,7 @@ struct LabeledKnob : juce::Component
     // ✅ 2.1: setter para controlar alto del "slot" por knob
     void setLabelSlotHeights (int pngTop, int textTop)
     {
-        pngTopH  = juce::jlimit (6, 48, pngTop);   // mínimo 6 (más chico)
+        pngTopH  = juce::jlimit (6, 48, pngTop);
         textTopH = juce::jlimit (6, 48, textTop);
         resized();
         repaint();
@@ -672,25 +672,44 @@ struct LabeledKnob : juce::Component
         repaint();
     }
 
+    // ✅ IMPLEMENTACIÓN pedida:
+    // - knob 25% más chico
+    // - PNG/label más pegado al knob
+    // - lógica consistente para que queden alineados
     void resized() override
     {
         auto r = getLocalBounds();
 
-        // ✅ 2.1: usa tamaños configurables
-        const int topH = imageComp.isVisible() ? pngTopH : textTopH;
+        const bool hasImg = imageComp.isVisible();
+        const int topH = hasImg ? pngTopH : textTopH;
 
-        if (imageComp.isVisible())
-            imageComp.setBounds (r.removeFromTop (topH).reduced (1, 2));
+        // Zona superior (PNG o texto)
+        auto top = r.removeFromTop (topH);
+
+        if (hasImg)
+            imageComp.setBounds (top.reduced (1, 1));   // menos padding => más pegado
         else
-            label.setBounds (r.removeFromTop (topH));
+            label.setBounds (top);
 
-        // ✅ 2.2: slider interno más chico (moderado y consistente)
-        slider.setBounds (r.reduced (16, 14));
+        // Gap mínimo entre label y knob (antes era enorme por el reduced(16,14))
+        r.removeFromTop (2);
+
+        // Knob 25% más chico (0.75x), pero alineado y centrado en X
+        auto knobArea = r;
+        const int maxSide = juce::jmin (knobArea.getWidth(), knobArea.getHeight());
+        const int side    = juce::jmax (10, juce::roundToInt (maxSide * 0.75f));
+
+        // Lo “pegamos” más arriba (cerca del label) y lo centramos horizontalmente
+        auto knobBounds = juce::Rectangle<int> (0, 0, side, side)
+                            .withCentre (juce::Point<int> (knobArea.getCentreX(),
+                                                           knobArea.getY() + side / 2));
+
+        slider.setBounds (knobBounds);
     }
 };
+
 } // namespace ui
 
 } // namespace plugin
-
 
 
