@@ -273,9 +273,6 @@ public:
     {
         typeface = plugin::ui::getEmbeddedPluginTypeface();
 
-        // ✅ CAMBIO: QUITADO setDefaultSansSerifTypeface global (no cubre todo y puede afectar al host)
-        // El knob y componentes con este LNF seguirán usando la fuente por getTypefaceForFont() override.
-
         setColour (juce::ComboBox::backgroundColourId, juce::Colours::black);
         setColour (juce::ComboBox::textColourId,       juce::Colours::white);
         setColour (juce::ComboBox::arrowColourId,      juce::Colours::white);
@@ -375,49 +372,37 @@ public:
                                                    juce::PathStrokeType::curved,
                                                    juce::PathStrokeType::rounded));
 
-        // ---------- NUEVO: modo bipolar (TONE) ----------
-        const bool isBipolarTone = (slider.getName() == "tone_bipolar");
-        if (isBipolarTone)
+        // ---------- (C) NUEVO: valueArc bipolar desde el centro con color por lado ----------
+        const bool bipolar = (bool) slider.getProperties().getWithDefault ("bipolar", false);
+        const float midAngle = rotaryStartAngle + 0.5f * (rotaryEndAngle - rotaryStartAngle);
+
+        juce::Colour useFill = fillCol;
+        float a0 = rotaryStartAngle;
+        float a1 = angle;
+
+        if (bipolar)
         {
-            const float midPos   = 0.5f;
-            const float midAngle = rotaryStartAngle + midPos * (rotaryEndAngle - rotaryStartAngle);
-
-            const auto colRight = juce::Colour::fromString ("FF6763FD"); // derecha = agresivo
-            const auto colLeft  = juce::Colour::fromString ("FF62D384"); // izquierda = relajado
-
-            // si está exactamente en el centro, no pintes nada
-            if (sliderPosProportional > midPos + 1.0e-6f)
+            if (sliderPosProportional >= 0.5f)
             {
-                juce::Path valueArc;
-                valueArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f,
-                                        midAngle, angle, true);
-
-                g.setColour (colRight);
-                g.strokePath (valueArc, juce::PathStrokeType (thickness,
-                                                              juce::PathStrokeType::curved,
-                                                              juce::PathStrokeType::rounded));
+                const int c = (int) slider.getProperties().getWithDefault ("bipolarFillRight", (int) fillCol.getARGB());
+                useFill = juce::Colour ((juce::uint32) c);
+                a0 = midAngle;
+                a1 = angle;      // centro -> derecha
             }
-            else if (sliderPosProportional < midPos - 1.0e-6f)
+            else
             {
-                juce::Path valueArc;
-                valueArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f,
-                                        angle, midAngle, true);
-
-                g.setColour (colLeft);
-                g.strokePath (valueArc, juce::PathStrokeType (thickness,
-                                                              juce::PathStrokeType::curved,
-                                                              juce::PathStrokeType::rounded));
+                const int c = (int) slider.getProperties().getWithDefault ("bipolarFillLeft", (int) fillCol.getARGB());
+                useFill = juce::Colour ((juce::uint32) c);
+                a0 = angle;
+                a1 = midAngle;   // izquierda -> centro
             }
-
-            return; // importantísimo: evita que siga al modo normal
         }
 
-        // ---------- modo normal (como estaba) ----------
+        // Dibuja el arco del valor
         juce::Path valueArc;
-        valueArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f,
-                                rotaryStartAngle, angle, true);
+        valueArc.addCentredArc (centre.x, centre.y, radius, radius, 0.0f, a0, a1, true);
 
-        g.setColour (fillCol);
+        g.setColour (useFill);
         g.strokePath (valueArc, juce::PathStrokeType (thickness,
                                                       juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
@@ -561,16 +546,12 @@ public:
     explicit MinimalEditor (YourPluginAudioProcessor& proc)
         : juce::AudioProcessorEditor (&proc)
         , processor (proc)
-        , tone2Knob  ("Tone")
+        , driveKnob  ("Tone 2")   // (A) ✅ Antes: "Drive"
         , toneKnob   ("Tone")
         , mixKnob    ("Mix")
         , outputKnob ("Output")
     {
         // ✅ CAMBIO: LookAndFeel default global SOLO mientras el editor vive
-        // Fuente global para TODO lo que JUCE crea fuera del árbol de hijos
-        // (PopupMenu/ComboBox, CallOutBox, BubbleMessage, TooltipWindow, etc).
-        // Importante en plugins: lo activamos solo mientras el editor vive,
-        // y lo restauramos en el destructor para no afectar al host.
         if (auto* current = &juce::LookAndFeel::getDefaultLookAndFeel();
             current != &globalFontLnf)
         {
@@ -582,21 +563,35 @@ public:
         setLookAndFeel (&knobLNF);
 
         // Look & Feel knobs
-        tone2Knob.slider.setLookAndFeel (&knobLNF);
-        toneKnob .slider.setLookAndFeel (&knobLNF);
-        mixKnob  .slider.setLookAndFeel (&knobLNF);
+        driveKnob .slider.setLookAndFeel (&knobLNF);
+        toneKnob  .slider.setLookAndFeel (&knobLNF);
+        mixKnob   .slider.setLookAndFeel (&knobLNF);
         outputKnob.slider.setLookAndFeel (&knobLNF);
 
-        // Marcar ambos TONE como bipolares (para dibujo desde el centro)
-        tone2Knob.slider.setName ("tone_bipolar");
-        toneKnob .slider.setName ("tone_bipolar");
+        // (B) ✅ Marcar sliders como bipolares + colores izquierda/derecha
+        auto setBipolar = [] (juce::Slider& s, juce::Colour left, juce::Colour right)
+        {
+            s.getProperties().set ("bipolar", true);
+            s.getProperties().set ("bipolarFillLeft",  (int) left.getARGB());
+            s.getProperties().set ("bipolarFillRight", (int) right.getARGB());
+        };
 
-        // Colores: outline neutro (relleno lo maneja el modo bipolar)
-        tone2Knob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF3A3A3A"));
-        tone2Knob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF")); // no se usará en bipolar
+        // Drive -> ahora “Tone 2”
+        setBipolar (driveKnob.slider,
+                    juce::Colour::fromString ("FF62D384"), // izquierda  #62D384
+                    juce::Colour::fromString ("FF6763FD"));// derecha    #6763FD
+
+        // (Opcional recomendado) Tone original bipolar visual con mismo color a ambos lados
+        setBipolar (toneKnob.slider,
+                    juce::Colour::fromString ("FFCC66FF"),
+                    juce::Colour::fromString ("FFCC66FF"));
+
+        // Colores base (outline neutro)
+        driveKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF3A3A3A"));
+        driveKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF")); // fallback
 
         toneKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF3A3A3A"));
-        toneKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF")); // no se usará en bipolar
+        toneKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF")); // fallback
 
         mixKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF555555"));
         mixKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFFFFFFF"));
@@ -606,17 +601,17 @@ public:
         outputKnob.slider.setColour (juce::Slider::rotarySliderFillColourId,    juce::Colour::fromString ("FFD0D0D0"));
 
         // Fonts/labels (usar FontOptions)
-        tone2Knob.label.setFont (juce::Font (juce::FontOptions (11.0f)));
-        toneKnob .label.setFont (juce::Font (juce::FontOptions (11.0f)));
-        mixKnob  .label.setFont (juce::Font (juce::FontOptions (11.0f)));
+        driveKnob .label.setFont (juce::Font (juce::FontOptions (11.0f)));
+        toneKnob  .label.setFont (juce::Font (juce::FontOptions (11.0f)));
+        mixKnob   .label.setFont (juce::Font (juce::FontOptions (11.0f)));
         outputKnob.label.setFont (juce::Font (juce::FontOptions (11.0f)));
 
-        tone2Knob.label.setLookAndFeel (&knobLNF);
-        toneKnob .label.setLookAndFeel (&knobLNF);
-        mixKnob  .label.setLookAndFeel (&knobLNF);
+        driveKnob .label.setLookAndFeel (&knobLNF);
+        toneKnob  .label.setLookAndFeel (&knobLNF);
+        mixKnob   .label.setLookAndFeel (&knobLNF);
         outputKnob.label.setLookAndFeel (&knobLNF);
 
-        addAndMakeVisible (tone2Knob);
+        addAndMakeVisible (driveKnob);
         addAndMakeVisible (toneKnob);
         addAndMakeVisible (mixKnob);
         addAndMakeVisible (outputKnob);
@@ -639,13 +634,12 @@ public:
        #endif
 
        #if PLUGIN_HAS_ASSETS
-        // Tone/Tone/Mix labels (Drive reemplazado por Tone2)
-        tone2Knob.setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
+        // Labels PNG: dejamos Tone/Mix como estaban. Para Tone 2 usamos texto ("Tone 2") por defecto.
         toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
 
-        // Slots (Tone igual que antes)
-        tone2Knob.setLabelSlotHeights (20, 14);
+        // Slots
+        driveKnob.setLabelSlotHeights (20, 14); // texto (no PNG) OK
         toneKnob .setLabelSlotHeights (20, 14);
         mixKnob  .setLabelSlotHeights (12, 14);
 
@@ -660,6 +654,7 @@ public:
         outputKnob.setLabelSlotHeights (12, 14);
        #else
         // Sin assets: al menos conserva los slots para texto
+        driveKnob.setLabelSlotHeights (20, 14);
         outputKnob.setLabelSlotHeights (12, 14);
        #endif
 
@@ -700,9 +695,8 @@ public:
 
         addAndMakeVisible (autoGainLabel);
 
-        // Attachments
-        // Ahora hay 2 knobs controlando el mismo parámetro "tone"
-        tone2Att   = std::make_unique<SliderAttachment>   (processor.apvts, "tone",   tone2Knob.slider);
+        // Attachments (✅ ahora son parámetros reales)
+        driveAtt   = std::make_unique<SliderAttachment>   (processor.apvts, "drive",  driveKnob.slider);
         toneAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "tone",   toneKnob.slider);
         mixAtt     = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
         outputAtt  = std::make_unique<SliderAttachment>   (processor.apvts, "output", outputKnob.slider);
@@ -718,7 +712,6 @@ public:
         startTimerHz (30);
         timerCallback(); // aplica estado inicial (incluye PNG/enable)
 
-        // (B) ✅ Un poco más alto (solo lo necesario) para que no se achiquen knobs
         setSize (410, 560);
     }
 
@@ -731,7 +724,6 @@ public:
         if (previousDefaultLnf != nullptr)
             juce::LookAndFeel::setDefaultLookAndFeel (previousDefaultLnf);
 
-        // Importante: evitar punteros colgantes (knobLNF vive como miembro)
         setLookAndFeel (nullptr);
 
         preampBox.setLookAndFeel (nullptr);
@@ -739,14 +731,14 @@ public:
 
         autoGainLabel.setLookAndFeel (nullptr);
 
-        tone2Knob.label.setLookAndFeel (nullptr);
-        toneKnob .label.setLookAndFeel (nullptr);
-        mixKnob  .label.setLookAndFeel (nullptr);
+        driveKnob .label.setLookAndFeel (nullptr);
+        toneKnob  .label.setLookAndFeel (nullptr);
+        mixKnob   .label.setLookAndFeel (nullptr);
         outputKnob.label.setLookAndFeel (nullptr);
 
-        tone2Knob.slider.setLookAndFeel (nullptr);
-        toneKnob .slider.setLookAndFeel (nullptr);
-        mixKnob  .slider.setLookAndFeel (nullptr);
+        driveKnob .slider.setLookAndFeel (nullptr);
+        toneKnob  .slider.setLookAndFeel (nullptr);
+        mixKnob   .slider.setLookAndFeel (nullptr);
         outputKnob.slider.setLookAndFeel (nullptr);
     }
 
@@ -757,7 +749,6 @@ public:
 
     void resized() override
     {
-        // ✅ Margen reducido para el nuevo ancho
         auto area = getLocalBounds().reduced (24);
 
         // -------------------------
@@ -777,8 +768,6 @@ public:
 
         // -------------------------
         // BOTTOM AREA (2 filas)
-        // fila 1: preampBox (full)
-        // fila 2: osBox + AutoGain (tick + label)
         const int bottomH = 96;
         auto bottomArea = area.removeFromBottom (juce::jmin (bottomH, area.getHeight()));
         bottomArea = bottomArea.reduced (0, 6);
@@ -824,8 +813,7 @@ public:
         row2.removeFromLeft (kGap);
         auto r2c2 = row2;
 
-        // ✅ más “aire” útil (menos padding) para que no queden mini
-        tone2Knob .setBounds (r1c1.reduced (4, 2));
+        driveKnob .setBounds (r1c1.reduced (4, 2));
         toneKnob  .setBounds (r1c2.reduced (4, 2));
         mixKnob   .setBounds (r2c1.reduced (4, 2));
         outputKnob.setBounds (r2c2.reduced (4, 2));
@@ -873,7 +861,8 @@ private:
 
     AnimatedHeader header;
 
-    plugin::ui::LabeledKnob tone2Knob;
+    // ✅ Ahora sí: Drive -> “Tone 2”
+    plugin::ui::LabeledKnob driveKnob;
     plugin::ui::LabeledKnob toneKnob;
     plugin::ui::LabeledKnob mixKnob;
     plugin::ui::LabeledKnob outputKnob;
@@ -886,7 +875,7 @@ private:
     juce::ComboBox preampBox;
     juce::ComboBox osBox;
 
-    std::unique_ptr<SliderAttachment> tone2Att, toneAtt, mixAtt, outputAtt;
+    std::unique_ptr<SliderAttachment> driveAtt, toneAtt, mixAtt, outputAtt;
     std::unique_ptr<ComboBoxAttachment> preampAtt, osAtt;
     std::unique_ptr<ButtonAttachment> autoGainAtt;
 
