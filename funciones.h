@@ -37,15 +37,14 @@ namespace plugin
 // (A) ✅ Knobs: estructura para pasar controles a los presets
 struct Knobs
 {
-    float drive01 = 0.5f; // 0..1
-    float tone01  = 0.5f; // 0..1
-    float mix01   = 1.0f; // 0..1
+    // Tone 1: carácter (izquierda = agresivo, derecha = suavecito) 0..1
+    float tone1_01 = 0.5f;
 
-    // Izquierda = agresivo (+1), derecha = relajado (-1)
-    inline float driveSigned() const noexcept { return (0.5f - drive01) * 2.0f; }
+    // Tone 2: color (izquierda = dark, derecha = bright) 0..1
+    float tone2_01 = 0.5f;
 
-    // Izquierda = dark (-1), derecha = bright (+1)
-    inline float toneSigned() const noexcept { return (tone01 - 0.5f) * 2.0f; }
+    // Mix: 0..1
+    float mix01   = 1.0f;
 };
 
 //==============================================================================
