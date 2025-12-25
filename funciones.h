@@ -34,6 +34,28 @@
 namespace plugin
 {
 //==============================================================================
+// (A) ✅ Knobs: estructura para pasar controles a los presets
+struct Knobs
+{
+    float drive01 = 0.5f; // 0..1
+    float tone01  = 0.5f; // 0..1
+    float mix01   = 1.0f; // 0..1
+
+    // Izquierda = agresivo (+1), derecha = relajado (-1)
+    inline float driveSigned() const noexcept { return (0.5f - drive01) * 2.0f; }
+
+    // Izquierda = dark (-1), derecha = bright (+1)
+    inline float toneSigned() const noexcept { return (tone01 - 0.5f) * 2.0f; }
+};
+
+//==============================================================================
+// Helper clamp01 (para mapping bipolar)
+inline float clamp01 (float x) noexcept
+{
+    return juce::jlimit (0.0f, 1.0f, x);
+}
+
+//==============================================================================
 // Soft clip final "safety"
 inline float softClipSafety (float x) noexcept
 {
@@ -70,84 +92,46 @@ inline float softClipSafety (float x) noexcept
 }
 
 //==============================================================================
-// ✅ Drive/Tone2 0..1 -> dB de pregain (BIPOLAR)
-// Requerimiento:
-// - 0.5 => 0 dB (neutro)
-// - >0.5 => +dB (agresivo)
-// - <0.5 => -dB (relajado)
-inline float mapDriveDb (float drive01) noexcept
+// (B) ✅ Drive/Tone2 0..1 -> dB de pregain (BIPOLAR) (invertido como pediste)
+// - IZQUIERDA  (s<0) => agresivo (+dB)
+// - DERECHA    (s>=0)=> relajado (-dB)
+inline float mapDriveDb (float x01) noexcept
 {
-    const float x = juce::jlimit (0.0f, 1.0f, drive01);
+    x01 = clamp01 (x01);
+    const float s = x01 - 0.5f;
+    const float a = std::fabs (s) * 2.0f;
+    const float a2 = a * a;
 
-    // Centro neutro
-    const float s = x - 0.5f;              // -0.5 .. +0.5
-    const float a = std::abs (s) / 0.5f;   // 0..1
+    const float maxAggDb   = 36.0f; // izquierda agresivo
+    const float maxRelaxDb = 12.0f; // derecha relajado
 
-    // Dead-zone pequeño para que el centro sea realmente “nada”
-    constexpr float dead = 0.02f;
-    if (a <= dead)
-        return 0.0f;
+    // IZQUIERDA (s<0) => agresivo (GAIN +dB)
+    if (s < 0.0f)
+        return +maxAggDb * a2;
 
-    // Renormaliza 0..1 después del dead-zone
-    const float an = juce::jlimit (0.0f, 1.0f, (a - dead) / (1.0f - dead));
-
-    // Curva musical (similar a tu exp original)
-    constexpr float k = 3.25f;
-    const float expNorm  = 1.0f - std::exp (-k);
-    const float expCurve = (1.0f - std::exp (-k * an)) / (expNorm > 0.0f ? expNorm : 1.0f);
-    const float shaped   = 0.18f * an + 0.82f * expCurve; // 0..1
-
-    // Rangos (ajustables):
-    constexpr float maxAggDb   = 36.0f; // derecha (agresivo)
-    constexpr float maxRelaxDb = 12.0f; // izquierda (relajado)
-
-    if (s >= 0.0f)
-        return  maxAggDb * shaped;   // agresivo
-    return -maxRelaxDb * shaped;      // relajado
+    // DERECHA (s>=0) => relajado (GAIN -dB)
+    return -maxRelaxDb * a2;
 }
 
 //==============================================================================
-// Tone 0..1 -> Tilt dB (neutral EXACTO en 0.5, con "dead-zone" alrededor)
-//
-// Requerimiento:
-// - En el centro (0.5) NO debe hacer nada.
-// - Hacia la derecha => sonido más oscuro.
-// - Hacia la izquierda => sonido más brillante.
-//
-// Inspiración: el "Tone" tipo Decapitator, pero con una respuesta más robusta:
-// - dead-zone para que el centro sea realmente neutro
-// - curva no-lineal para que el movimiento se sienta musical
-// - rango asimétrico (típicamente conviene menos boost de brillo que de dark)
-inline float mapToneTiltDb (float tone01) noexcept
+// (C) ✅ Tone 0..1 -> Tilt dB (invertido como pediste)
+// - DERECHA (s>0) => BRIGHT (+dB)
+// - IZQUIERDA (s<=0) => DARK (-dB)
+inline float mapToneTiltDb (float t01) noexcept
 {
-    const float t = juce::jlimit (0.0f, 1.0f, tone01);
+    t01 = clamp01 (t01);
+    const float s = t01 - 0.5f;
+    const float a = std::fabs (s) * 2.0f;
 
-    // signed: -0.5..+0.5 (izq..der)
-    float s = t - 0.5f;
+    const float maxBrightDb = 5.0f; // derecha
+    const float maxDarkDb   = 6.0f; // izquierda
 
-    // dead-zone alrededor del centro ("no hace nada")
-    constexpr float dead = 0.06f; // ~6% del recorrido total
-    if (std::abs (s) <= dead * 0.5f)
-        return 0.0f;
+    // DERECHA (s>0) => BRIGHT (+dB)
+    if (s > 0.0f)
+        return +maxBrightDb * a;
 
-    // remap quitando la zona muerta
-    const float sign = (s >= 0.0f ? 1.0f : -1.0f);
-    const float mag  = (std::abs (s) - dead * 0.5f) / (0.5f - dead * 0.5f); // 0..1
-
-    // curva musical: suave al inicio, más decisión al final
-    constexpr float curve = 1.55f;
-    const float a = std::pow (juce::jlimit (0.0f, 1.0f, mag), curve);
-
-    // Asimetría deliberada:
-    // - Dark suele tolerar un poquito más (por distorsión/armónicos)
-    // - Bright conviene ser más conservador para evitar harsh
-    constexpr float maxDarkDb   = 9.0f;
-    constexpr float maxBrightDb = 7.0f;
-
-    // Nota: derecha = oscuro (tilt NEGATIVO), izquierda = brillante (tilt POSITIVO)
-    if (sign > 0.0f)
-        return -maxDarkDb * a;
-    return  maxBrightDb * a;
+    // IZQUIERDA (s<=0) => DARK (-dB)
+    return -maxDarkDb * a;
 }
 
 // Mezcla equal-power
