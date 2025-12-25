@@ -516,6 +516,12 @@ void YourPluginAudioProcessor::renderChainA (juce::AudioBuffer<float>& io, int w
     if (activePreset == nullptr || activePreset->process == nullptr)
         return;
 
+    // ✅ NUEVO: knobs (se pasan al preset)
+    plugin::Knobs knobs;
+    knobs.drive01 = (pDrive != nullptr ? pDrive->load() : 0.5f);
+    knobs.tone01  = (pTone  != nullptr ? pTone->load()  : 0.5f);
+    knobs.mix01   = (pMix   != nullptr ? pMix->load()   : 1.0f);
+
     const int osIdx = currentOSIndex;
     auto* osPtr = (osIdx == 0 ? nullptr : oversamplers[osIdx].get());
 
@@ -538,8 +544,8 @@ void YourPluginAudioProcessor::renderChainA (juce::AudioBuffer<float>& io, int w
 
             for (size_t n = 0; n < osSamples; ++n)
             {
-                L[n] = activePreset->process (stL, L[n]);
-                R[n] = activePreset->process (stR, R[n]);
+                L[n] = activePreset->process (stL, L[n], knobs);
+                R[n] = activePreset->process (stR, R[n], knobs);
                 stereoA.processSample (L[n], R[n]); // ✅ Stereo vida real ON
             }
         }
@@ -550,7 +556,7 @@ void YourPluginAudioProcessor::renderChainA (juce::AudioBuffer<float>& io, int w
             void* st = (void*) &getActiveStateStorage (0);
 
             for (size_t n = 0; n < osSamples; ++n)
-                data[n] = activePreset->process (st, data[n]);
+                data[n] = activePreset->process (st, data[n], knobs);
         }
 
         osPtr->processSamplesDown (baseBlock);
@@ -568,8 +574,8 @@ void YourPluginAudioProcessor::renderChainA (juce::AudioBuffer<float>& io, int w
 
             for (int i = 0; i < numSamples; ++i)
             {
-                wetL[i] = activePreset->process (stL, wetL[i]);
-                wetR[i] = activePreset->process (stR, wetR[i]);
+                wetL[i] = activePreset->process (stL, wetL[i], knobs);
+                wetR[i] = activePreset->process (stR, wetR[i], knobs);
                 stereoA.processSample (wetL[i], wetR[i]); // ✅
             }
         }
@@ -577,7 +583,7 @@ void YourPluginAudioProcessor::renderChainA (juce::AudioBuffer<float>& io, int w
         {
             void* st = (void*) &getActiveStateStorage (0);
             for (int i = 0; i < numSamples; ++i)
-                wetL[i] = activePreset->process (st, wetL[i]);
+                wetL[i] = activePreset->process (st, wetL[i], knobs);
         }
     }
 }
@@ -591,6 +597,12 @@ void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int w
     const auto* pendingPreset = &PresetRegistry::items[(size_t) pendingPresetIndex];
     if (pendingPreset == nullptr || pendingPreset->process == nullptr)
         return;
+
+    // ✅ NUEVO: knobs (se pasan al preset)
+    plugin::Knobs knobs;
+    knobs.drive01 = (pDrive != nullptr ? pDrive->load() : 0.5f);
+    knobs.tone01  = (pTone  != nullptr ? pTone->load()  : 0.5f);
+    knobs.mix01   = (pMix   != nullptr ? pMix->load()   : 1.0f);
 
     const int osIdx = pendingOSIndex;
     auto* osPtr = (osIdx == 0 ? nullptr : oversamplers[osIdx].get());
@@ -614,8 +626,8 @@ void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int w
 
             for (size_t n = 0; n < osSamples; ++n)
             {
-                L[n] = pendingPreset->process (stL, L[n]);
-                R[n] = pendingPreset->process (stR, R[n]);
+                L[n] = pendingPreset->process (stL, L[n], knobs);
+                R[n] = pendingPreset->process (stR, R[n], knobs);
                 stereoB.processSample (L[n], R[n]); // ✅ Stereo vida real ON
             }
         }
@@ -625,7 +637,7 @@ void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int w
             void* st = (void*) &getPendingStateStorage (0);
 
             for (size_t n = 0; n < osSamples; ++n)
-                data[n] = pendingPreset->process (st, data[n]);
+                data[n] = pendingPreset->process (st, data[n], knobs);
         }
 
         osPtr->processSamplesDown (baseBlock);
@@ -642,8 +654,8 @@ void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int w
 
             for (int i = 0; i < numSamples; ++i)
             {
-                wetL[i] = pendingPreset->process (stL, wetL[i]);
-                wetR[i] = pendingPreset->process (stR, wetR[i]);
+                wetL[i] = pendingPreset->process (stL, wetL[i], knobs);
+                wetR[i] = pendingPreset->process (stR, wetR[i], knobs);
                 stereoB.processSample (wetL[i], wetR[i]); // ✅
             }
         }
@@ -651,7 +663,7 @@ void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int w
         {
             void* st = (void*) &getPendingStateStorage (0);
             for (int i = 0; i < numSamples; ++i)
-                wetL[i] = pendingPreset->process (st, wetL[i]);
+                wetL[i] = pendingPreset->process (st, wetL[i], knobs);
         }
     }
 }
@@ -897,15 +909,21 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         const float pregain = juce::Decibels::decibelsToGain (plugin::mapDriveDb (drive01));
 
         float xL = ch0[i] * pregain;
-        xL = lowShelfL.processSample (xL);
-        xL = highShelfL.processSample (xL);
+
+        // ✅ CAMBIO (B): quitar TONE como “filtro encima”
+        // xL = lowShelfL.processSample (xL);
+        // xL = highShelfL.processSample (xL);
+
         wetL[i] = xL;
 
         if (wetR != nullptr && ch1 != nullptr)
         {
             float xR = ch1[i] * pregain;
-            xR = lowShelfR.processSample (xR);
-            xR = highShelfR.processSample (xR);
+
+            // ✅ CAMBIO (B): quitar TONE como “filtro encima”
+            // xR = lowShelfR.processSample (xR);
+            // xR = highShelfR.processSample (xR);
+
             wetR[i] = xR;
         }
     }
@@ -966,6 +984,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
             if (osPtr != nullptr)
             {
+                // ✅ NUEVO: knobs (se pasan al preset también aquí)
+                plugin::Knobs knobs;
+                knobs.drive01 = (pDrive != nullptr ? pDrive->load() : 0.5f);
+                knobs.tone01  = (pTone  != nullptr ? pTone->load()  : 0.5f);
+                knobs.mix01   = (pMix   != nullptr ? pMix->load()   : 1.0f);
+
                 juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
                 baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
 
@@ -998,8 +1022,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
                         for (size_t n = 0; n < osSamples; ++n)
                         {
-                            L[n] = activePreset->process (stL, L[n]);
-                            R[n] = activePreset->process (stR, R[n]);
+                            L[n] = activePreset->process (stL, L[n], knobs);
+                            R[n] = activePreset->process (stR, R[n], knobs);
                             stereoA.processSample (L[n], R[n]); // ✅
                         }
                     }
@@ -1008,7 +1032,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
                         float* data = osBlockA.getChannelPointer (0);
                         void* st = (void*) &getActiveStateStorage (0);
                         for (size_t n = 0; n < osSamples; ++n)
-                            data[n] = activePreset->process (st, data[n]);
+                            data[n] = activePreset->process (st, data[n], knobs);
                     }
                 }
 
@@ -1029,8 +1053,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
                         for (size_t n = 0; n < osSamples; ++n)
                         {
-                            Lb[n] = pendingPreset->process (stL, Lb[n]);
-                            Rb[n] = pendingPreset->process (stR, Rb[n]);
+                            Lb[n] = pendingPreset->process (stL, Lb[n], knobs);
+                            Rb[n] = pendingPreset->process (stR, Rb[n], knobs);
                             stereoB.processSample (Lb[n], Rb[n]); // ✅
                         }
                     }
@@ -1039,7 +1063,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
                         float* data = osTemp.getWritePointer (0);
                         void* st = (void*) &getPendingStateStorage (0);
                         for (size_t n = 0; n < osSamples; ++n)
-                            data[n] = pendingPreset->process (st, data[n]);
+                            data[n] = pendingPreset->process (st, data[n], knobs);
                     }
                 }
 
@@ -1234,3 +1258,4 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
