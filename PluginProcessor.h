@@ -43,11 +43,11 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
 private:
-    void updateTiltCoeffs (float tone01);
+    void updateTiltCoeffs (float tone2_01); // legacy tilt (si se usa)
 
     // ✅ Helpers para "Tone" sin clicks (rampa/interpolación de coeficientes)
-    void calcTiltCoeffArrays (float tone01, std::array<float, 6>& low, std::array<float, 6>& high);
-    void beginTiltRamp (float tone01, int rampSamples);
+    void calcTiltCoeffArrays (float tone2_01, std::array<float, 6>& low, std::array<float, 6>& high);
+    void beginTiltRamp (float tone2_01, int rampSamples);
     inline void tickTiltRamp() noexcept;
 
     // Oversampling selector (0=x1, 1=x2, 2=x4, 3=x8)
@@ -230,8 +230,8 @@ private:
 
     //==============================================================================
     // Parameter pointers
-    std::atomic<float>* pDrive  = nullptr;
-    std::atomic<float>* pTone   = nullptr;
+    std::atomic<float>* pTone1  = nullptr; // param ID: "drive" (UI: Tone 1)
+    std::atomic<float>* pTone2  = nullptr; // param ID: "tone"  (UI: Tone 2)
     std::atomic<float>* pMix    = nullptr;
     std::atomic<float>* pPreamp = nullptr;
 
@@ -242,8 +242,8 @@ private:
     std::atomic<float>* pOutputDb = nullptr;
 
     // Smoothers
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> driveSm;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> toneSm;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> tone1Sm;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> tone2Sm;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSm;
 
     // ✅ NUEVO: Output gain (lineal) + crossfade AutoGain (0..1)
