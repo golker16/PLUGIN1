@@ -6,7 +6,6 @@
 #include <JuceHeader.h>
 #include <cmath>
 
-
 //------------------------------------------------------------------------------
 // Assets / BinaryData
 // - PLUGIN_HAS_ASSETS: definido desde CMake cuando existe al menos 1 archivo
@@ -70,27 +69,41 @@ inline float softClipSafety (float x) noexcept
     return sign * juce::jlimit (0.0f, 1.0f, y);
 }
 
-// Drive 0..1 -> dB de pregain
+//==============================================================================
+// ✅ Drive/Tone2 0..1 -> dB de pregain (BIPOLAR)
+// Requerimiento:
+// - 0.5 => 0 dB (neutro)
+// - >0.5 => +dB (agresivo)
+// - <0.5 => -dB (relajado)
 inline float mapDriveDb (float drive01) noexcept
 {
-    // Objetivo:
-    // - Mejor resolución en valores bajos/medios ("sweet spot")
-    // - Menos "explosión" al final (más controlable en presets agresivos)
-    // - Misma idea: DRIVE es pregain para empujar el preset
-    //
-    // Curva exponencial normalizada (asintótica) + un pequeño componente lineal
-    // para que el control cerca de 0 siga siendo predecible.
     const float x = juce::jlimit (0.0f, 1.0f, drive01);
 
-    constexpr float k = 3.25f; // más alto = más resolución al inicio
-    const float expNorm = 1.0f - std::exp (-k);
-    const float expCurve = (1.0f - std::exp (-k * x)) / (expNorm > 0.0f ? expNorm : 1.0f);
+    // Centro neutro
+    const float s = x - 0.5f;              // -0.5 .. +0.5
+    const float a = std::abs (s) / 0.5f;   // 0..1
 
-    // Mezcla suave (evita que el final se sienta "todo o nada")
-    const float shaped = 0.18f * x + 0.82f * expCurve; // 0..1
+    // Dead-zone pequeño para que el centro sea realmente “nada”
+    constexpr float dead = 0.02f;
+    if (a <= dead)
+        return 0.0f;
 
-    // Rango de pregain (dB): un poco más de headroom para empujar presets, sin volverse inusable.
-    return 36.0f * shaped; // 0..36 dB
+    // Renormaliza 0..1 después del dead-zone
+    const float an = juce::jlimit (0.0f, 1.0f, (a - dead) / (1.0f - dead));
+
+    // Curva musical (similar a tu exp original)
+    constexpr float k = 3.25f;
+    const float expNorm  = 1.0f - std::exp (-k);
+    const float expCurve = (1.0f - std::exp (-k * an)) / (expNorm > 0.0f ? expNorm : 1.0f);
+    const float shaped   = 0.18f * an + 0.82f * expCurve; // 0..1
+
+    // Rangos (ajustables):
+    constexpr float maxAggDb   = 36.0f; // derecha (agresivo)
+    constexpr float maxRelaxDb = 12.0f; // izquierda (relajado)
+
+    if (s >= 0.0f)
+        return  maxAggDb * shaped;   // agresivo
+    return -maxRelaxDb * shaped;      // relajado
 }
 
 //==============================================================================
