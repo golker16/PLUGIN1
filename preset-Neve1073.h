@@ -23,8 +23,8 @@
 //
 // ✅ CAMBIO (PUNTO 4 pedido):
 //  - El preset recibe plugin::Knobs y USA el comportamiento (no es “filtro encima”):
-//    * Tone: dark/bright altera preEdge, de-esser, de-fizz y aire
-//    * Tone 2 / Drive: agresivo/relajado altera drive, sag, asimetría y “espacio” (allpass)
+//    * Tone 2: dark/bright altera preEdge, de-esser, de-fizz y aire
+//    * Tone 1: agresivo/suavecito altera carácter interno (sin cambiar ganancia) y el ‘espacio’ (allpass)
 
 #include "funciones.h" // (A) ✅ plugin::Knobs + helpers compartidos
 
@@ -38,8 +38,8 @@ struct Preset_Neve1073
 
     // (B) ✅ Descripción de comportamiento de knobs (opcional, para UI/presets)
     static constexpr const char* kKnobBehavior =
-        "Tone (izq=dark, der=bright) altera el carácter interno: preEdge, de-esser, de-fizz y aire. "
-        "Tone 2 / Drive (izq=agresivo, der=relajado) cambia drive/sag/asimetría y el ‘espacio’ (allpass).";
+        "Tone 2 (izq=dark, der=bright) altera el carácter interno: preEdge, de-esser, de-fizz y aire. "
+        "Tone 1 (izq=agresivo, der=suavecito) cambia el carácter y el ‘espacio’ (allpass) SIN cambiar ganancia.";
 
     using Real = double;
 
@@ -229,21 +229,23 @@ struct Preset_Neve1073
 
         Real x = (Real) xIn;
 
-        // (D) ✅ knobs -> signed + mezclas 0..1
-        const Real toneS    = (Real) k.toneSigned(); // -1 dark .. +1 bright
-        const Real bright01 = clamp01T ((toneS + (Real) 1) * (Real) 0.5);
+        // (D) ✅ knobs (raw 0..1) -> comportamiento *definido en este preset*
+        // Tone 2: -1 dark .. +1 bright
+        const Real tone2S   = (Real) ((k.tone2_01 - 0.5f) * 2.0f);
+        const Real bright01 = clamp01T ((tone2S + (Real) 1) * (Real) 0.5);
         const Real dark01   = (Real) 1 - bright01;
 
-        const Real driveS   = (Real) k.driveSigned(); // +1 agresivo .. -1 relajado
-        const Real agg01    = clamp01T ((driveS + (Real) 1) * (Real) 0.5);
+        // Tone 1: +1 agresivo .. -1 suavecito  (izq agresivo, der suave)
+        const Real tone1S   = (Real) ((0.5f - k.tone1_01) * 2.0f);
+        const Real agg01    = clamp01T ((tone1S + (Real) 1) * (Real) 0.5);
         const Real relax01  = (Real) 1 - agg01;
 
         // ============================================================
         // Arquitectura HQ:
-        // DC → (CAL) → (KNOB DRIVE) → detector → asimetría(level+drift) → sub HP → trafo IN
-        // → mid-forward → HF de-esser (tone) → pre-edge LP (tone) → slew (tone) → amp1 (ADAA2)
+        // DC → (CAL) → (TONE 1: carácter) → detector → asimetría(level+drift) → sub HP → trafo IN
+        // → mid-forward → HF de-esser (tone2) → pre-edge LP (tone2) → slew (tone2) → amp1 (ADAA2)
         // → inter RC → amp2 (ADAA1) → de-nasal → trafo OUT
-        // → allpass glue (drive/tone) → loading LP (tone) + dip → defizz (tone) / postLP (tone) → (CAL OUT)
+        // → allpass glue (tone1/tone2) → loading LP (tone2) + dip → defizz (tone2) / postLP (tone2) → (CAL OUT)
         // ============================================================
 
         // ---- Tolerancias por canal (±1–3%) ----
@@ -265,11 +267,8 @@ struct Preset_Neve1073
         // ✅ A) Calibración headroom real (-18 dBFS ≈ 0 VU)
         x *= (Real) kInCal;
 
-        // (E) ✅ Drive interno real (no solo ganancia externa)
-        {
-            const Real driveDb = (Real) 9.0 * agg01 - (Real) 6.0 * relax01;
-            x *= dbToLinT (driveDb);
-        }
+        // (E) ✅ Tone 1 NO cambia la ganancia (no es “Drive”).
+        //     Solo cambia el carácter (agresivo ↔ suavecito) dentro del preset.
 
         // ------------------------------------------------------------
         // 1) Detector perceptual (HPF solo para medición) + env + sag
@@ -306,9 +305,9 @@ struct Preset_Neve1073
         const Real env01 = clamp01T (s.env * (Real) 1.60);
         const Real sag01 = clamp01T (s.sagEnv * (Real) 1.15);
 
-        // Sag gain (sutil) + (E) ✅ sag dependiente del knob
+        // Sag gain (sutil) + (E) ✅ sag dependiente del knob (Tone1: agresivo aumenta sag)
         {
-            const Real sagAmt = (Real) 0.12 + (Real) 0.12 * agg01; // ✅ knob
+            const Real sagAmt = (Real) 0.12 + (Real) 0.12 * agg01; // ✅ tone1
             const Real sagG   = 1.0 / (1.0 + sagAmt * (s.sagEnv * 1.25));
             x *= sagG;
         }
@@ -332,7 +331,7 @@ struct Preset_Neve1073
             Real evenMul = 1.0 + (Real) 0.35 * s.drift;
             evenMul = clampT (evenMul, (Real) 0.65, (Real) 1.35);
 
-            // (E) ✅ Asimetría/even harmonics dependiente del knob
+            // (E) ✅ Asimetría/even harmonics dependiente de Tone1 (agresivo = más)
             const Real evenAmt = baseEven * evenMul * ((Real) 0.85 + (Real) 0.70 * agg01);
 
             x += evenAmt * (x * std::fabs (x));
@@ -374,7 +373,7 @@ struct Preset_Neve1073
         }
 
         // ------------------------------------------------------------
-        // 5) Drives por banda
+        // 5) Drives por banda (NO depende de Tone1 como "ganancia"; solo carácter más abajo)
         {
             const Real driveLo = ((Real) 1.00 + (Real) 0.38 * env01) * trimDrive;
             const Real driveHi = ((Real) 1.00 + (Real) 0.92 * env01) * trimDrive;
@@ -437,14 +436,14 @@ struct Preset_Neve1073
             hf01 = clamp01T (s.hfEnv * (Real) 1.75);
         }
 
-        // (E) ✅ De-esser responde al TONE (dark de-essea más / bright menos)
+        // (E) ✅ De-esser responde al TONE 2 (dark de-essea más / bright menos)
         hf01 *= (Real) (0.55 + 0.75 * dark01);
 
         // 7.c) Pre-edge LP
         {
             Real fc = ((Real) 55000.0 - (Real) 26000.0 * env01 - (Real) 9000.0 * sag01) * trimFc;
 
-            // (E) ✅ Pre-edge LP abre/cierra con TONE (bright = más aire)
+            // (E) ✅ Pre-edge LP abre/cierra con TONE 2 (bright = más aire)
             fc *= (Real) (0.75 + 0.55 * bright01);
 
             fc *= (1.0 - (Real) 0.32 * hf01);
@@ -460,7 +459,7 @@ struct Preset_Neve1073
             Real slewMax = (Real) 1.15 - (Real) 0.55 * env01 - (Real) 0.10 * sag01;
             slewMax = clampT (slewMax, (Real) 0.25, (Real) 1.35);
 
-            // (E) ✅ Slew limiting también con TONE (bright deja más ataque)
+            // (E) ✅ Slew limiting también con TONE 2 (bright deja más ataque)
             slewMax *= ((Real) 0.85 + (Real) 0.35 * bright01);
 
             const Real dy = clampT (high - s.slew_y, -slewMax, +slewMax);
@@ -525,7 +524,7 @@ struct Preset_Neve1073
             Real f2 = ((Real) 1800.0 + (Real) 1400.0 * env01 + (Real) 350.0 * sag01) * trimFc;
 
             // (E) ✅ Espacio/ambiente real con ALLPASS:
-            // relajado = más smear; agresivo = más tight
+            // suavecito = más smear; agresivo = más tight
             const Real apMul =
                 ((Real) 1.15 - (Real) 0.45 * relax01) *
                 ((Real) 0.90 + (Real) 0.20 * bright01);
@@ -545,7 +544,7 @@ struct Preset_Neve1073
         {
             Real fc = ((Real) 65000.0 - (Real) 38000.0 * ((Real) 0.65 * env01 + (Real) 0.35 * sag01)) * trimFc;
 
-            // (E) ✅ Loading LP con TONE (bright abre, dark suaviza)
+            // (E) ✅ Loading LP con TONE 2 (bright abre, dark suaviza)
             fc *= (Real) (0.90 + 0.25 * bright01);
 
             const Real a  = alphaFromHzT (clampT (fc, (Real) 18000.0, (Real) 90000.0), sr);
@@ -578,7 +577,7 @@ struct Preset_Neve1073
         {
             Real fc = ((Real) 19500.0 - (Real) 12000.0 * env01) * trimFc;
 
-            // (E) ✅ De-fizz con TONE (bright abre, dark suaviza)
+            // (E) ✅ De-fizz con TONE 2 (bright abre, dark suaviza)
             fc *= (Real) (0.75 + 0.55 * bright01);
 
             const Real a  = alphaFromHzT (clampT (fc, (Real) 6000.0, (Real) 24000.0), sr);
@@ -592,7 +591,7 @@ struct Preset_Neve1073
         {
             Real fc = ((Real) 25500.0 - (Real) 16000.0 * env01) * trimFc;
 
-            // (E) ✅ Post HF damping con TONE (bright abre, dark suaviza)
+            // (E) ✅ Post HF damping con TONE 2 (bright abre, dark suaviza)
             fc *= (Real) (0.80 + 0.45 * bright01);
 
             const Real a  = alphaFromHzT (clampT (fc, (Real) 8000.0, (Real) 32000.0), sr);
@@ -1014,6 +1013,5 @@ private:
         return clampT (y, (Real) -1.35, (Real) 1.35);
     }
 };
-
 
 
