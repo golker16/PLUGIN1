@@ -15,6 +15,9 @@
 #include <new>
 #include <type_traits>
 
+// (A) ✅ Para plugin::Knobs
+#include "funciones.h"
+
 // Presets disponibles
 #include "preset-Neve1073.h"
 
@@ -22,16 +25,21 @@ struct PresetRegistry
 {
     struct Item
     {
-        const char* displayName = nullptr;
+        const char* displayName  = nullptr;
+        const char* knobBehavior = nullptr;
+
         std::size_t stateSize  = 1;
         std::size_t stateAlign = alignof (std::max_align_t);
+
         // Lifecycle del State (para soportar State con inicializadores / miembros no POD)
         void  (*construct)(void* state) = nullptr;
         void  (*destruct) (void* state) = nullptr;
 
         void  (*prepare)(void* state, float sr) = nullptr;
         void  (*reset)  (void* state) = nullptr;
-        float (*process)(void* state, float x) = nullptr;
+
+        // (B) ✅ Firma nueva: el preset recibe knobs
+        float (*process)(void* state, float x, const plugin::Knobs& k) = nullptr;
     };
 
     template <typename Preset>
@@ -44,16 +52,22 @@ struct PresetRegistry
         static_assert (std::is_nothrow_destructible_v<typename Preset::State>,
                        "Preset::State must be nothrow destructible");
 
-        return Item {
+        return Item
+        {
+            // (C) ✅ registra texto de comportamiento por preset
             Preset::kDisplayName,
+            Preset::kKnobBehavior,
+
             sizeof (typename Preset::State),
             alignof (typename Preset::State),
+
             +[](void* st)
             {
                 new (st) typename Preset::State();
             },
             +[](void* st)
             {
+                // ✅ FIX: destruir el tipo correcto
                 reinterpret_cast<typename Preset::State*> (st)->~State();
             },
             +[](void* st, float sr)
@@ -66,10 +80,12 @@ struct PresetRegistry
                 auto& s = *reinterpret_cast<typename Preset::State*> (st);
                 Preset::reset (s);
             },
-            +[](void* st, float x) -> float
+
+            // (C) ✅ ahora pasa knobs al preset
+            +[](void* st, float x, const plugin::Knobs& k) -> float
             {
                 auto& s = *reinterpret_cast<typename Preset::State*> (st);
-                return Preset::process (s, x);
+                return Preset::process (s, x, k);
             }
         };
     }
