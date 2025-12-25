@@ -577,14 +577,15 @@ public:
         };
 
         // Drive -> ahora “Tone 2”
+        // ✅ IZQUIERDA = agresivo (#6763FD) | DERECHA = relajado (#62D384)
         setBipolar (driveKnob.slider,
-                    juce::Colour::fromString ("FF62D384"), // izquierda  #62D384
-                    juce::Colour::fromString ("FF6763FD"));// derecha    #6763FD
+                    juce::Colour::fromString ("FF6763FD"), // izquierda  #6763FD  (agresivo)
+                    juce::Colour::fromString ("FF62D384"));// derecha    #62D384  (relajado)
 
-        // (Opcional recomendado) Tone original bipolar visual con mismo color a ambos lados
+        // Tone: izquierda dark (#CC66FF), derecha bright (#F9FF34)
         setBipolar (toneKnob.slider,
-                    juce::Colour::fromString ("FFCC66FF"),
-                    juce::Colour::fromString ("FFCC66FF"));
+                    juce::Colour::fromString ("FFCC66FF"), // izquierda  #CC66FF (dark)
+                    juce::Colour::fromString ("FFF9FF34"));// derecha    #F9FF34 (bright)
 
         // Colores base (outline neutro)
         driveKnob.slider.setColour (juce::Slider::rotarySliderOutlineColourId, juce::Colour::fromString ("FF3A3A3A"));
