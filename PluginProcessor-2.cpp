@@ -10,15 +10,17 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
-    // ✅ CAMBIO: "drive" -> "Tone 2" y default 0.5 (centro neutro)
-    // Mantener ID "drive" para no romper automatizaciones/estado
+    // ✅ CAMBIO: ID "drive" se mantiene (no romper automatizaciones/estado)
+    // UI/host: ahora es "Tone 1"
     params.push_back (std::make_unique<juce::AudioParameterFloat>(
-        "drive", "Tone 2",
+        "drive", "Tone 1",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.0001f),
         0.5f));
 
+    // ✅ CAMBIO: ID "tone" se mantiene
+    // UI/host: ahora es "Tone 2"
     params.push_back (std::make_unique<juce::AudioParameterFloat>(
-        "tone", "Tone",
+        "tone", "Tone 2",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.0001f),
         0.5f));
 
@@ -72,8 +74,9 @@ YourPluginAudioProcessor::YourPluginAudioProcessor()
                             .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
     , apvts (*this, nullptr, "PARAMS", makeLayout())
 {
-    pDrive  = apvts.getRawParameterValue ("drive");
-    pTone   = apvts.getRawParameterValue ("tone");
+    // ✅ CAMBIO: pTone1/pTone2 (IDs siguen siendo "drive" y "tone")
+    pTone1  = apvts.getRawParameterValue ("drive"); // Tone 1
+    pTone2  = apvts.getRawParameterValue ("tone");  // Tone 2
     pMix    = apvts.getRawParameterValue ("mix");
     pPreamp = apvts.getRawParameterValue ("preamp");
     pOS     = apvts.getRawParameterValue ("os");
@@ -138,9 +141,9 @@ void YourPluginAudioProcessor::setStateInformation (const void* data, int sizeIn
 
 //==============================================================================
 // Tilt (legacy setter directo)
-void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
+void YourPluginAudioProcessor::updateTiltCoeffs (float tone2_01)
 {
-    const float t = juce::jlimit (0.0f, 1.0f, tone01);
+    const float t = juce::jlimit (0.0f, 1.0f, tone2_01);
     const float tiltDb = plugin::mapToneTiltDb (t);
 
     const float mag01 = juce::jlimit (0.0f, 1.0f, std::abs (tiltDb) / 9.0f);
@@ -162,7 +165,7 @@ void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
         fcLow  = fcLowBase  * (1.0f - 0.15f * mag01);
     }
 
-    fcLow  = juce::jlimit (90.0f,  650.0f, fcLow);
+    fcLow  = juce::jlimit (90.0f,   650.0f,  fcLow);
     fcHigh = juce::jlimit (1200.0f, 8000.0f, fcHigh);
 
     constexpr float q = 0.707f;
@@ -180,11 +183,11 @@ void YourPluginAudioProcessor::updateTiltCoeffs (float tone01)
 //==============================================================================
 // ✅ Tone sin clicks: helpers rampa/interpolación de coeficientes
 
-void YourPluginAudioProcessor::calcTiltCoeffArrays (float tone01,
+void YourPluginAudioProcessor::calcTiltCoeffArrays (float tone2_01,
                                                     std::array<float, 6>& low,
                                                     std::array<float, 6>& high)
 {
-    const float t = juce::jlimit (0.0f, 1.0f, tone01);
+    const float t = juce::jlimit (0.0f, 1.0f, tone2_01);
     const float tiltDb = plugin::mapToneTiltDb (t);
 
     const float mag01 = juce::jlimit (0.0f, 1.0f, std::abs (tiltDb) / 9.0f);
@@ -224,11 +227,11 @@ void YourPluginAudioProcessor::calcTiltCoeffArrays (float tone01,
     }
 }
 
-void YourPluginAudioProcessor::beginTiltRamp (float tone01, int rampSamples)
+void YourPluginAudioProcessor::beginTiltRamp (float tone2_01, int rampSamples)
 {
     const int N = juce::jmax (1, rampSamples);
 
-    calcTiltCoeffArrays (tone01, tiltLowTgt, tiltHighTgt);
+    calcTiltCoeffArrays (tone2_01, tiltLowTgt, tiltHighTgt);
 
     for (int i = 0; i < 6; ++i)
     {
@@ -365,13 +368,13 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 {
     sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-    driveSm.reset (sr, 0.02);
-    toneSm .reset (sr, 0.02);
+    // ✅ CAMBIO: smoothers ahora son Tone 1 / Tone 2
+    tone1Sm.reset (sr, 0.02);
+    tone2Sm.reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
 
-    // ✅ CAMBIO: fallback de drive a 0.5 (centro neutro)
-    driveSm.setCurrentAndTargetValue (pDrive ? pDrive->load() : 0.5f);
-    toneSm .setCurrentAndTargetValue (pTone  ? pTone ->load() : 0.5f);
+    tone1Sm.setCurrentAndTargetValue (pTone1 ? pTone1->load() : 0.5f);
+    tone2Sm.setCurrentAndTargetValue (pTone2 ? pTone2->load() : 0.5f);
     mixSm  .setCurrentAndTargetValue (pMix   ? pMix  ->load() : 1.0f);
 
     // ✅ NUEVO: Output gain + blend autogain
@@ -387,7 +390,8 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
     highShelfR.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
 
-    updateTiltCoeffs (pTone ? pTone->load() : 0.5f);
+    // Legacy tilt: usa Tone 2 (dark/bright)
+    updateTiltCoeffs (pTone2 ? pTone2->load() : 0.5f);
 
     // ✅ Inicializar arrays de coef para ramp
     auto read6 = [] (const juce::dsp::IIR::Coefficients<float>& c, std::array<float, 6>& dst)
@@ -440,7 +444,7 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
         }
     };
 
-    // activePresetIndex = banco activo (inicialmente activoState apunta a A)
+    // activePresetIndex = banco activo (inicialmente activeState apunta a A)
     // pendingPresetIndex (FUERA de transición) lo usamos para “qué preset vive en el banco INACTIVO”
     destructBank (presetStateA, presetStateConstructedA, activePresetIndex);
     destructBank (presetStateB, presetStateConstructedB, pendingPresetIndex);
@@ -516,11 +520,11 @@ void YourPluginAudioProcessor::renderChainA (juce::AudioBuffer<float>& io, int w
     if (activePreset == nullptr || activePreset->process == nullptr)
         return;
 
-    // ✅ NUEVO: knobs (se pasan al preset)
+    // ✅ CAMBIO: knobs ahora son tone1_01 / tone2_01
     plugin::Knobs knobs;
-    knobs.drive01 = (pDrive != nullptr ? pDrive->load() : 0.5f);
-    knobs.tone01  = (pTone  != nullptr ? pTone->load()  : 0.5f);
-    knobs.mix01   = (pMix   != nullptr ? pMix->load()   : 1.0f);
+    knobs.tone1_01 = (pTone1 != nullptr ? pTone1->load() : 0.5f);
+    knobs.tone2_01 = (pTone2 != nullptr ? pTone2->load() : 0.5f);
+    knobs.mix01    = (pMix   != nullptr ? pMix->load()   : 1.0f);
 
     const int osIdx = currentOSIndex;
     auto* osPtr = (osIdx == 0 ? nullptr : oversamplers[osIdx].get());
@@ -598,11 +602,11 @@ void YourPluginAudioProcessor::renderChainB (juce::AudioBuffer<float>& io, int w
     if (pendingPreset == nullptr || pendingPreset->process == nullptr)
         return;
 
-    // ✅ NUEVO: knobs (se pasan al preset)
+    // ✅ CAMBIO: knobs ahora son tone1_01 / tone2_01
     plugin::Knobs knobs;
-    knobs.drive01 = (pDrive != nullptr ? pDrive->load() : 0.5f);
-    knobs.tone01  = (pTone  != nullptr ? pTone->load()  : 0.5f);
-    knobs.mix01   = (pMix   != nullptr ? pMix->load()   : 1.0f);
+    knobs.tone1_01 = (pTone1 != nullptr ? pTone1->load() : 0.5f);
+    knobs.tone2_01 = (pTone2 != nullptr ? pTone2->load() : 0.5f);
+    knobs.mix01    = (pMix   != nullptr ? pMix->load()   : 1.0f);
 
     const int osIdx = pendingOSIndex;
     auto* osPtr = (osIdx == 0 ? nullptr : oversamplers[osIdx].get());
@@ -847,9 +851,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* ch1 = (numCh > 1) ? buffer.getWritePointer (1) : nullptr;
 
     // targets de smoothers
-    // ✅ CAMBIO: fallback de drive a 0.5 (centro neutro)
-    driveSm.setTargetValue (pDrive ? pDrive->load() : 0.5f);
-    toneSm .setTargetValue (pTone  ? pTone ->load() : 0.5f);
+    tone1Sm.setTargetValue (pTone1 ? pTone1->load() : 0.5f);
+    tone2Sm.setTargetValue (pTone2 ? pTone2->load() : 0.5f);
     mixSm  .setTargetValue (pMix   ? pMix  ->load() : 1.0f);
 
     // ✅ AutoGain ON/OFF + Output targets
@@ -893,24 +896,27 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     for (int i = 0; i < numSamples; ++i)
     {
-        const float toneVal = toneSm.getNextValue();
+        // Tone 2 (dark/bright) — legacy tilt ramp (aunque los filtros están comentados abajo)
+        const float tone2Val = tone2Sm.getNextValue();
 
         if (strideLeft <= 0)
         {
             const int rampN = juce::jmin (kTiltUpdateStride, numSamples - i);
-            beginTiltRamp (toneVal, rampN);
+            beginTiltRamp (tone2Val, rampN);
             strideLeft = kTiltUpdateStride;
         }
 
         tickTiltRamp();
         --strideLeft;
 
-        const float drive01 = driveSm.getNextValue();
-        const float pregain = juce::Decibels::decibelsToGain (plugin::mapDriveDb (drive01));
+        // ✅ IMPORTANTE: avanzar tone1Sm para mantener el smoother “vivo” (aunque no lo usemos aquí)
+        (void) tone1Sm.getNextValue();
 
+        // ✅ CAMBIO: NO HAY pregain por “Drive”. Tone 1 ya NO es Drive.
+        const float pregain = 1.0f;
         float xL = ch0[i] * pregain;
 
-        // ✅ CAMBIO (B): quitar TONE como “filtro encima”
+        // ✅ (B): quitar TONE como “filtro encima”
         // xL = lowShelfL.processSample (xL);
         // xL = highShelfL.processSample (xL);
 
@@ -920,7 +926,7 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         {
             float xR = ch1[i] * pregain;
 
-            // ✅ CAMBIO (B): quitar TONE como “filtro encima”
+            // ✅ (B): quitar TONE como “filtro encima”
             // xR = lowShelfR.processSample (xR);
             // xR = highShelfR.processSample (xR);
 
@@ -984,11 +990,11 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
             if (osPtr != nullptr)
             {
-                // ✅ NUEVO: knobs (se pasan al preset también aquí)
+                // ✅ CAMBIO: knobs ahora son tone1_01 / tone2_01 (tercer lugar donde se arman)
                 plugin::Knobs knobs;
-                knobs.drive01 = (pDrive != nullptr ? pDrive->load() : 0.5f);
-                knobs.tone01  = (pTone  != nullptr ? pTone->load()  : 0.5f);
-                knobs.mix01   = (pMix   != nullptr ? pMix->load()   : 1.0f);
+                knobs.tone1_01 = (pTone1 != nullptr ? pTone1->load() : 0.5f);
+                knobs.tone2_01 = (pTone2 != nullptr ? pTone2->load() : 0.5f);
+                knobs.mix01    = (pMix   != nullptr ? pMix->load()   : 1.0f);
 
                 juce::dsp::AudioBlock<float> baseBlock (wetBuffer);
                 baseBlock = baseBlock.getSubBlock (0, (size_t) numSamples);
@@ -1170,9 +1176,9 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     for (int i = 0; i < numSamples; ++i)
     {
-        const float mix01  = mixSm.getNextValue();
-        const float blend  = autoGainBlendSm.getNextValue();  // 0..1
-        const float gManual = outputGainSm.getNextValue();    // lineal
+        const float mix01   = mixSm.getNextValue();
+        const float blend   = autoGainBlendSm.getNextValue();  // 0..1
+        const float gManual = outputGainSm.getNextValue();     // lineal
 
         const int wp = dryDelayWritePos;
         int rp = wp - dryDelaySamples;
