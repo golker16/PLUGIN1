@@ -10,10 +10,12 @@ static juce::AudioProcessorValueTreeState::ParameterLayout makeLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
+    // ✅ CAMBIO: "drive" -> "Tone 2" y default 0.5 (centro neutro)
+    // Mantener ID "drive" para no romper automatizaciones/estado
     params.push_back (std::make_unique<juce::AudioParameterFloat>(
-        "drive", "Drive",
+        "drive", "Tone 2",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.0001f),
-        0.25f));
+        0.5f));
 
     params.push_back (std::make_unique<juce::AudioParameterFloat>(
         "tone", "Tone",
@@ -367,7 +369,8 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     toneSm .reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
 
-    driveSm.setCurrentAndTargetValue (pDrive ? pDrive->load() : 0.25f);
+    // ✅ CAMBIO: fallback de drive a 0.5 (centro neutro)
+    driveSm.setCurrentAndTargetValue (pDrive ? pDrive->load() : 0.5f);
     toneSm .setCurrentAndTargetValue (pTone  ? pTone ->load() : 0.5f);
     mixSm  .setCurrentAndTargetValue (pMix   ? pMix  ->load() : 1.0f);
 
@@ -832,7 +835,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     auto* ch1 = (numCh > 1) ? buffer.getWritePointer (1) : nullptr;
 
     // targets de smoothers
-    driveSm.setTargetValue (pDrive ? pDrive->load() : 0.25f);
+    // ✅ CAMBIO: fallback de drive a 0.5 (centro neutro)
+    driveSm.setTargetValue (pDrive ? pDrive->load() : 0.5f);
     toneSm .setTargetValue (pTone  ? pTone ->load() : 0.5f);
     mixSm  .setTargetValue (pMix   ? pMix  ->load() : 1.0f);
 
