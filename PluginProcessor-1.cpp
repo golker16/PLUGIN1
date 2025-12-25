@@ -546,8 +546,8 @@ public:
     explicit MinimalEditor (YourPluginAudioProcessor& proc)
         : juce::AudioProcessorEditor (&proc)
         , processor (proc)
-        , driveKnob  ("Tone 2")   // (A) ✅ Antes: "Drive"
-        , toneKnob   ("Tone")
+        , driveKnob  ("Tone 1")   // ✅ Antes: "Drive" / luego "Tone 2"
+        , toneKnob   ("Tone 2")   // ✅ Bright/Dark
         , mixKnob    ("Mix")
         , outputKnob ("Output")
     {
@@ -576,13 +576,12 @@ public:
             s.getProperties().set ("bipolarFillRight", (int) right.getARGB());
         };
 
-        // Drive -> ahora “Tone 2”
-        // ✅ IZQUIERDA = agresivo (#6763FD) | DERECHA = relajado (#62D384)
+        // Tone 1: izquierda agresivo (#6763FD) | derecha suavecito/relajado (#62D384)
         setBipolar (driveKnob.slider,
                     juce::Colour::fromString ("FF6763FD"), // izquierda  #6763FD  (agresivo)
-                    juce::Colour::fromString ("FF62D384"));// derecha    #62D384  (relajado)
+                    juce::Colour::fromString ("FF62D384"));// derecha    #62D384  (suavecito)
 
-        // Tone: izquierda dark (#CC66FF), derecha bright (#F9FF34)
+        // Tone 2: izquierda dark (#CC66FF), derecha bright (#F9FF34)
         setBipolar (toneKnob.slider,
                     juce::Colour::fromString ("FFCC66FF"), // izquierda  #CC66FF (dark)
                     juce::Colour::fromString ("FFF9FF34"));// derecha    #F9FF34 (bright)
@@ -635,13 +634,13 @@ public:
        #endif
 
        #if PLUGIN_HAS_ASSETS
-        // Labels PNG: dejamos Tone/Mix como estaban. Para Tone 2 usamos texto ("Tone 2") por defecto.
-        toneKnob .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::tone_png,  BinaryData::tone_pngSize));
+        // Labels PNG: mantenemos MIX. Para Tone 2 quitamos el PNG fijo para que se lea el texto correcto.
+        // (Antes: toneKnob.setLabelImage(tone_png) -> ahora NO)
         mixKnob  .setLabelImage (juce::ImageCache::getFromMemory (BinaryData::mix_png,   BinaryData::mix_pngSize));
 
         // Slots
-        driveKnob.setLabelSlotHeights (20, 14); // texto (no PNG) OK
-        toneKnob .setLabelSlotHeights (20, 14);
+        driveKnob.setLabelSlotHeights (20, 14); // texto OK
+        toneKnob .setLabelSlotHeights (20, 14); // texto OK (Tone 2)
         mixKnob  .setLabelSlotHeights (12, 14);
 
         // (C) ✅ Output PNGs (on/off) - nombre correcto
@@ -656,6 +655,7 @@ public:
        #else
         // Sin assets: al menos conserva los slots para texto
         driveKnob.setLabelSlotHeights (20, 14);
+        toneKnob .setLabelSlotHeights (20, 14);
         outputKnob.setLabelSlotHeights (12, 14);
        #endif
 
@@ -696,7 +696,7 @@ public:
 
         addAndMakeVisible (autoGainLabel);
 
-        // Attachments (✅ ahora son parámetros reales)
+        // Attachments (IDs se mantienen: "drive" ahora es Tone 1, "tone" ahora es Tone 2)
         driveAtt   = std::make_unique<SliderAttachment>   (processor.apvts, "drive",  driveKnob.slider);
         toneAtt    = std::make_unique<SliderAttachment>   (processor.apvts, "tone",   toneKnob.slider);
         mixAtt     = std::make_unique<SliderAttachment>   (processor.apvts, "mix",    mixKnob.slider);
@@ -862,7 +862,7 @@ private:
 
     AnimatedHeader header;
 
-    // ✅ Ahora sí: Drive -> “Tone 2”
+    // ✅ "drive" (param) -> Tone 1 ; "tone" (param) -> Tone 2
     plugin::ui::LabeledKnob driveKnob;
     plugin::ui::LabeledKnob toneKnob;
     plugin::ui::LabeledKnob mixKnob;
