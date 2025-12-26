@@ -43,13 +43,6 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
 private:
-    void updateTiltCoeffs (float tone2_01); // legacy tilt (si se usa)
-
-    // ✅ Helpers para "Tone" sin clicks (rampa/interpolación de coeficientes)
-    void calcTiltCoeffArrays (float tone2_01, std::array<float, 6>& low, std::array<float, 6>& high);
-    void beginTiltRamp (float tone2_01, int rampSamples);
-    inline void tickTiltRamp() noexcept;
-
     // Oversampling selector (0=x1, 1=x2, 2=x4, 3=x8)
     int  getDesiredOversamplingIndex() const noexcept;
     void ensureOversamplers (int numChannels);
@@ -243,23 +236,11 @@ private:
 
     // Smoothers
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> tone1Sm;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> tone2Sm;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSm;
 
     // ✅ NUEVO: Output gain (lineal) + crossfade AutoGain (0..1)
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outputGainSm;      // ganancia lineal
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> autoGainBlendSm;   // 0..1 (crossfade ON/OFF)
-
-    // Tilt EQ (pre)
-    juce::dsp::IIR::Filter<float> lowShelfL, lowShelfR;
-    juce::dsp::IIR::Filter<float> highShelfL, highShelfR;
-
-    // ✅ NUEVO: estado para "Tone" sin clicks (rampa/interpolación de coeficientes)
-    static constexpr int kTiltUpdateStride = 32;
-
-    std::array<float, 6> tiltLowCur  {}, tiltLowTgt  {}, tiltLowStep  {};
-    std::array<float, 6> tiltHighCur {}, tiltHighTgt {}, tiltHighStep {};
-    int tiltRampRemaining = 0;
 
     // Oversampling (seleccionable en runtime)
     static constexpr int kMaxOversamplingIndex = 3; // x8
