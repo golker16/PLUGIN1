@@ -20,6 +20,11 @@
 // D) Diffusion bus extra safety:
 //    D1) RMS governor suave dentro del loop
 //    D2) DC guard dentro del loop (HPF 8 Hz aprox)
+//
+// ✅ HQ “más calidad” (esta implementación):
+// - ADAA1 tanh *no normalizada* para: histéresis del trafo, flux del core, asimetría del core
+// - SoftClip del diffusion loop con ADAA1 (con smoothing de ksc por-state)
+// - Soft-slew con ADAA1 aplicado a u = dx/slewMax
 
 #include "funciones.h"
 
@@ -170,6 +175,14 @@ struct Preset_Neve1073
         Real atanIn_x1  = 0.0;
         Real atanOut_x1 = 0.0;
 
+        // ✅ ADAA memories extra para TANH en transformadores (IN/OUT separados)
+        Real trafoIn_hyst_x1  = 0.0;
+        Real trafoOut_hyst_x1 = 0.0;
+        Real trafoIn_flux_x1  = 0.0;
+        Real trafoOut_flux_x1 = 0.0;
+        Real trafoIn_asym_x1  = 0.0;
+        Real trafoOut_asym_x1 = 0.0;
+
         // ---- Trafo signature biquads (OUT) ----
         Biquad trafoLF;
         Biquad trafoHF;
@@ -184,6 +197,9 @@ struct Preset_Neve1073
 
         // ---- Slew limiting (path amp) ----
         Real slew_y = 0.0;
+
+        // ✅ ADAA memory para soft-slew (sobre u = dx/slewMax)
+        Real slew_u_x1 = 0.0;
 
         // ---- ADAA memory amp stages ----
         Real amp1_x1 = 0.0;
@@ -219,6 +235,12 @@ struct Preset_Neve1073
         Real diffRms    = 0.0;
         Real diffDC_x1  = 0.0;
         Real diffDC_y1  = 0.0;
+
+        // ✅ ADAA memory para softclip en diffusion loop
+        Real diffClip_x1 = 0.0;
+
+        // ✅ smoothing de ksc por-state (recomendado en feedback)
+        Real diffKsc_sm = 0.0;
 
         // Phase tilt extra SOLO en el wet (estados separados)
         Real wet_ap1_x1 = 0.0, wet_ap1_y1 = 0.0;
@@ -317,6 +339,14 @@ struct Preset_Neve1073
         s.atanIn_x1  = 0.0;
         s.atanOut_x1 = 0.0;
 
+        // ✅ reset ADAA tanh memories (trafos)
+        s.trafoIn_hyst_x1  = 0.0;
+        s.trafoOut_hyst_x1 = 0.0;
+        s.trafoIn_flux_x1  = 0.0;
+        s.trafoOut_flux_x1 = 0.0;
+        s.trafoIn_asym_x1  = 0.0;
+        s.trafoOut_asym_x1 = 0.0;
+
         s.trafoLF.reset();
         s.trafoHF.reset();
         s.trafoSig_sm = 0.0;
@@ -326,6 +356,7 @@ struct Preset_Neve1073
 
         s.preEdge_lp = 0.0;
         s.slew_y = 0.0;
+        s.slew_u_x1 = 0.0;
 
         s.amp1_x1 = 0.0;
         s.amp1_x2 = 0.0;
@@ -352,6 +383,10 @@ struct Preset_Neve1073
         s.diffRms   = 0.0;
         s.diffDC_x1 = 0.0;
         s.diffDC_y1 = 0.0;
+
+        // ✅ reset ADAA softclip + smoothing k
+        s.diffClip_x1 = 0.0;
+        s.diffKsc_sm  = 0.0;
 
         // Wet phase-tilt reset
         s.wet_ap1_x1 = s.wet_ap1_y1 = 0.0;
@@ -586,9 +621,10 @@ struct Preset_Neve1073
             high *= driveHi;
         }
 
-        // 6) Trafo IN (con trimTrafo sutil)
-        low = transformerHystADAA_HQ (
+        // 6) Trafo IN (con trimTrafo sutil)  ✅ (tanh internas ahora ADAA)
+        low = transformerHystADAA_HQ(
             s.magIn, s.trafoIn_prevX, s.atanIn_x1,
+            s.trafoIn_hyst_x1, s.trafoIn_flux_x1, s.trafoIn_asym_x1,
             low, env01, sag01, sr,
             (Real) 55.0 * trimFc * trimTrafo,
             (Real) 0.24,
@@ -655,14 +691,18 @@ struct Preset_Neve1073
             high = s.preEdge_lp;
         }
 
-        // 7.d) Soft-slew limiting (tanh)
+        // 7.d) Soft-slew limiting (tanh) ✅ ahora con ADAA sobre u=dx/slewMax
         {
             Real slewMax = (Real) 1.15 - (Real) 0.55 * env01 - (Real) 0.10 * sag01;
             slewMax = clampT (slewMax, (Real) 0.25, (Real) 1.35);
             slewMax *= ((Real) 0.85 + (Real) 0.35 * bright01);
 
-            const Real dx = high - s.slew_y;
-            const Real dy = slewMax * std::tanh(dx / (slewMax + (Real) 1.0e-12));
+            const Real dx  = high - s.slew_y;
+            const Real inv = (Real) 1.0 / (slewMax + (Real) 1.0e-12);
+            const Real u   = dx * inv; // dx/slewMax
+            const Real t   = adaaTanh1NoNormT(u, s.slew_u_x1, (Real) 1.0); // tanh(u) ADAA
+            const Real dy  = slewMax * t;
+
             s.slew_y += dy;
             high = s.slew_y;
         }
@@ -705,9 +745,10 @@ struct Preset_Neve1073
 
         Real y = low + y2;
 
-        // 8) Trafo OUT (con trimTrafo sutil)
-        y = transformerHystADAA_HQ (
+        // 8) Trafo OUT (con trimTrafo sutil) ✅ (tanh internas ahora ADAA)
+        y = transformerHystADAA_HQ(
             s.magOut, s.trafoOut_prevX, s.atanOut_x1,
+            s.trafoOut_hyst_x1, s.trafoOut_flux_x1, s.trafoOut_asym_x1,
             y, env01, sag01, sr,
             (Real) 42.0 * trimFc * trimTrafo,
             (Real) 0.19,
@@ -816,10 +857,16 @@ struct Preset_Neve1073
             // Diffusion (loop signal)
             Real wetLoop = runDiffuserAllpassCascade (s, wetIn, fcList, sr);
 
-            // soft safety en loop
+            // soft safety en loop ✅ ahora ADAA softclip + smoothing de ksc (por-state)
             {
                 const Real ksc = (Real) 1.2 + (Real) 1.0 * relax01;
-                wetLoop = softClipTanh(wetLoop, ksc);
+
+                // smoothing k para feedback (ADAA más estable)
+                constexpr Real kscMs = (Real) 8.0;
+                const Real aKsc = alphaFromMsT(kscMs, sr);
+                s.diffKsc_sm = onePoleLPT(s.diffKsc_sm, ksc, aKsc);
+
+                wetLoop = softClipTanh_ADAA1(wetLoop, s.diffClip_x1, s.diffKsc_sm);
             }
 
             // ✅ 4.a) RMS governor suave (safety net)
@@ -1111,7 +1158,7 @@ private:
         return x;
     }
 
-    // ------------------ soft clip ------------------
+    // ------------------ soft clip (legacy helper; se mantiene) ------------------
     static inline Real softClipTanh(Real x, Real k) noexcept
     {
         const Real kk = clampT(k, (Real) 0.25, (Real) 8.0);
@@ -1227,6 +1274,7 @@ private:
         return std::log (std::cosh (z));
     }
 
+    // ADAA1 tanh normalizada: ~tanh(k*x)/tanh(k)
     template <typename T>
     static inline T adaaTanh1T (T x, T& x1, T k) noexcept
     {
@@ -1252,6 +1300,63 @@ private:
 
         const T d = std::tanh (k);
         return (std::fabs (d) > (T) 1.0e-18) ? (y / d) : y;
+    }
+
+    // ✅ ADAA1 tanh SIN normalizar: devuelve ~tanh(k*x) con menos aliasing.
+    template <typename T>
+    static inline T adaaTanh1NoNormT (T x, T& x1, T k) noexcept
+    {
+        const T denom = (x - x1);
+        T y;
+
+        if (std::fabs(denom) > (T)1.0e-12)
+        {
+            const T kx  = k * x;
+            const T kx1 = k * x1;
+
+            // F(x) = (1/k) * log cosh(kx)
+            const T Fx  = logCoshStableT(kx)  / k;
+            const T Fx1 = logCoshStableT(kx1) / k;
+
+            y = (Fx - Fx1) / denom;
+        }
+        else
+        {
+            y = std::tanh(k * x);
+        }
+
+        x1 = x;
+        return y; // <- NO divide por tanh(k)
+    }
+
+    // ✅ SoftClip tanh "like yours": tanh(k*x)/tanh(k) pero ADAA
+    template <typename T>
+    static inline T softClipTanh_ADAA1 (T x, T& x1, T k) noexcept
+    {
+        const T kk = clampT(k, (T)0.25, (T)8.0);
+        const T n  = std::tanh(kk);
+        if (std::fabs(n) < (T)1.0e-18) return x;
+
+        const T y = adaaTanh1NoNormT(x, x1, kk);
+        return y / n;
+    }
+
+    // ✅ Asimetría "cero-DC" como la tuya, pero el tanh(k*(x+bias)) con ADAA.
+    template <typename T>
+    static inline T asymTanhZero_ADAA1 (T x, T& x1, T k, T bias) noexcept
+    {
+        const T kk = k;
+        const T t0 = std::tanh(kk * bias); // offset constante
+
+        // y = tanh(k*(x+bias)) - tanh(k*bias)
+        const T y = adaaTanh1NoNormT(x + bias, x1, kk) - t0;
+
+        // Normalización (constante) igual que tu asymTanhZeroT
+        const T yp = std::tanh(kk * ((T) 1 + bias)) - t0;
+        const T yn = std::tanh(kk * ((T)-1 + bias)) - t0;
+        const T m  = (T)0.5 * (std::fabs(yp) + std::fabs(yn));
+
+        return (m > (T)1.0e-18) ? (y / m) : y;
     }
 
     static inline double li2_series_neg1_0 (double x) noexcept
@@ -1390,8 +1495,12 @@ private:
     }
 
     // ------------------ transformer HQ ------------------
-    static inline Real transformerCoreADAA_HQ (Real x, Real& atan_x1, Real env01, Real sag01,
-                                               Real driveBase, Real biasBase) noexcept
+    static inline Real transformerCoreADAA_HQ (Real x,
+                                              Real& atan_x1,
+                                              Real& flux_x1,
+                                              Real& asym_x1,
+                                              Real env01, Real sag01,
+                                              Real driveBase, Real biasBase) noexcept
     {
         const Real drive = (driveBase * (1.0 - 0.06 * sag01)) + 0.22 * env01;
         const Real bias  = (biasBase  + 0.018 * env01) + 0.010 * sag01;
@@ -1400,10 +1509,14 @@ private:
 
         const Real x2 = x * x;
         const Real fluxIn = x + ((Real) 0.12 + (Real) 0.05 * env01) * x * x2;
-        const Real flux   = std::tanh (((Real) 1.15 + (Real) 0.10 * env01) * fluxIn);
 
+        // ✅ flux tanh con ADAA (no normalizada)
+        const Real kFlux = ((Real) 1.15 + (Real) 0.10 * env01);
+        const Real flux  = adaaTanh1NoNormT(fluxIn, flux_x1, kFlux);
+
+        // ✅ asym tanh con ADAA (cero-DC)
         const Real k    = ((Real) 1.70 + (Real) 0.95 * env01) * (1.0 - (Real) 0.05 * sag01);
-        const Real asym = asymTanhZeroT (x, k, bias);
+        const Real asym = asymTanhZero_ADAA1(x, asym_x1, k, bias);
 
         Real y = (Real) 0.70 * core + (Real) 0.23 * flux + (Real) 0.07 * asym;
         y = lowLevelBlendT (x, y, (Real) 0.18);
@@ -1412,6 +1525,9 @@ private:
     }
 
     static inline Real transformerHystADAA_HQ (Real& m, Real& prevX, Real& atan_x1,
+                                               Real& hyst_x1,
+                                               Real& flux_x1,
+                                               Real& asym_x1,
                                                Real x, Real env01, Real sag01, Real sr,
                                                Real fcBase, Real hystAmt,
                                                Real driveBase, Real biasBase,
@@ -1433,7 +1549,9 @@ private:
         const Real d = ((Real) 1.10 + (Real) 0.60 * env01) * (1.0 - (Real) 0.06 * sag01);
         const Real h = hystAmt + (Real) 0.12 * env01;
 
-        const Real target = std::tanh (d * (x - h * m));
+        // ✅ histéresis target tanh con ADAA (no normalizada)
+        const Real u = (x - h * m);
+        const Real target = adaaTanh1NoNormT(u, hyst_x1, d);
         m = onePoleLPT (m, target, a);
 
         Real inject = (injectBase + (Real) 0.10 * env01 + (Real) 0.05 * sag01);
@@ -1441,7 +1559,7 @@ private:
 
         const Real xin = x + inject * m;
 
-        return transformerCoreADAA_HQ (xin, atan_x1, env01, sag01, driveBase, biasBase);
+        return transformerCoreADAA_HQ (xin, atan_x1, flux_x1, asym_x1, env01, sag01, driveBase, biasBase);
     }
 
     // ------------------ amp stages ------------------
