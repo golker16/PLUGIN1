@@ -3,33 +3,15 @@
 // preset-Neve1073.h (PRO ULTIMATE + HQ NEXT LEVEL + CAL/DRIFT/AP/DE-ESS)
 // Diseñado para correr DENTRO de oversampling (4x o más). Ideal: 96k -> 384k interno.
 //
-// Ya tenías (HQ+):
-//  1) Pre-edge LP real (anti-fizz) antes de amp1
-//  2) Trafo más real: leak en magnetización + "eddy loss" por derivada
-//  3) Slew limiting sutil en path de amp
-//  4) ADAA2 SOLO en amp stage 1 (tanh)
-//  5) Loading más real: LP dinámico + dip suave 18–30k
-//  6) Tolerancias por canal (±1–3%) determinísticas
-//  7) Sag más creíble: afecta drive/bias/softness
-//  8) Detector perceptual interno: HPF para medición
-//  9) Robustez: anti-denorm, NaN armor, clamps
-//
-// NUEVO (implementado en este archivo):
-//  A) Calibración headroom real: -18 dBFS ≈ 0 VU (kInCal / kOutCal)
-//  B) Asimetría “real”: dependiente de nivel + drift lento con leak (sin DC)
-//  C) Allpass “3D glue” (fase) post-trafo OUT y antes de loading (2 etapas)
-//  D) Dynamic HF de-esser ultra rápido (por eventos) que modula preEdge Fc
-//
-// ✅ IMPLEMENTADO AHORA:
-//  1) Diffusion Bus paralelo (ambiente sin reverb): allpass cascade + feedback + damping
-//  2) “Phase tilt” extra SOLO en el wet (más profundidad sin subir mix)
-//  5) 0 noise real: drift determinístico (sin RNG) + anti-denorm determinístico
-//
-// ✅ PATCH “KNOBS MÁS AUDIBLES + 1073-ish” (este mensaje):
-//  1) Smoothing + curvas audio taper para Tone1/Tone2 (más viaje sin zipper)
-//  2) Macro-coherencia: Tone1/Tone2 mueven MÁS cosas (sag/even/de-esser/rangos)
-//  3) Diffusion Bus mucho más sensible a Tone1 + smear más profundo
-//  4) Air shelf tipo 1073 (sutil pero MUY audible) controlado por Tone2
+// ✅ Implementa:
+// 1) Allpass “3D glue”: coef negativo permitido (más carácter de fase)
+// 2) Air shelf 1073-ish: biquad high-shelf (RBJ) con slope suave + smoothing de ganancia
+// 3) “Firma” de transformador OUT: LF bump + HF resonancia/caída suave dependiente de drive
+// 4) Anti-aliasing extra: ADAA1 para even (x*abs(x)) y cubic (t^3) + soft-slew
+// 5) Diffusion Bus: HPF feedback + softclip loop + denorm guard + mezcla power-constancy
+// 6) Macro Tone1/Tone2: redistribución drive low/high + de-esser release + preShelf forward
+// 7) Sag “power supply”: doble tiempo + weighting LF
+// 8) Tolerancias: trims separados (fc/drive/bias/trafo) con seeds determinísticas
 
 #include "funciones.h"
 
@@ -42,23 +24,52 @@ struct Preset_Neve1073
     static constexpr const char* kDisplayName = "Neve 1073";
 
     static constexpr const char* kKnobBehavior =
-        "Tone 2 (izq=dark, der=bright) altera: preEdge, de-esser, de-fizz y aire (air shelf 1073). "
+        "Tone 2 (izq=dark, der=bright) altera: preEdge, de-esser, de-fizz y aire (shelf RBJ 1073-ish). "
         "Tone 1 (izq=agresivo, der=suavecito) cambia carácter y ‘espacio’ SIN cambiar ganancia. "
         "Incluye Diffusion Bus paralelo controlado por Tone1/Tone2. Knobs smoothed + audio taper.";
 
     using Real = double;
 
+    // ------------------ Biquad helper ------------------
+    struct Biquad
+    {
+        Real b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+        Real z1 = 0, z2 = 0;
+
+        inline void reset() noexcept { z1 = z2 = 0; }
+
+        inline Real process(Real x) noexcept
+        {
+            // Transposed Direct Form II
+            const Real y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2;
+            z2 = b2 * x - a2 * y;
+            return y;
+        }
+    };
+
     struct State
     {
         float sr = 192000.0f;
 
-        // ---- Deterministic per-channel trim (tolerancias) ----
-        float chanTrim = 0.0f; // [-1..+1] estable por instancia/canal
+        // ---- Legacy (compat) ----
+        float chanTrim = 0.0f; // se mantiene, pero ya no gobierna todo
+
+        // ---- New: independent deterministic trims ----
+        float trimA = 0.0f; // filtro (fc)
+        float trimB = 0.0f; // drive
+        float trimC = 0.0f; // bias/asim
+        float trimT = 0.0f; // trafo signature/leak
 
         // ---- RMS envelope (medición perceptual) ----
-        Real envP   = 0.0;
-        Real env    = 0.0;
-        Real sagEnv = 0.0;
+        Real envP = 0.0;
+        Real env  = 0.0;
+
+        // ---- Sag “power supply”: doble tiempo + weighting LF ----
+        Real sagFast = 0.0;
+        Real sagSlow = 0.0;
+        Real sagEnv  = 0.0; // combinado (útil para otras modulaciones)
+        Real lf_lp   = 0.0;
 
         // HPF states SOLO para medición del detector
         Real meas_x1 = 0.0;
@@ -69,9 +80,13 @@ struct Preset_Neve1073
         Real dc_y1 = 0.0;
 
         // ---- Asimetría pro: drift lento (determinístico, sin RNG) ----
-        Real drift      = 0.0; // [-1..+1] aprox (muy lento)
-        Real driftLP    = 0.0; // lowpass (suaviza aún más)
-        Real driftPhase = 0.0; // fase del LFO
+        Real drift      = 0.0;
+        Real driftLP    = 0.0;
+        Real driftPhase = 0.0;
+
+        // ---- ADAA memory extra (even/cubic) ----
+        Real even_x1 = 0.0;
+        Real cub_x1  = 0.0;
 
         // ---- Subsonic HPF via LP (hp = x - lp) ----
         Real sub_lp = 0.0;
@@ -93,6 +108,11 @@ struct Preset_Neve1073
         // ADAA memory for atan in transformers
         Real atanIn_x1  = 0.0;
         Real atanOut_x1 = 0.0;
+
+        // ---- Trafo signature biquads (OUT) ----
+        Biquad trafoLF;
+        Biquad trafoHF;
+        Real   trafoSig_sm = 0.0;
 
         // ---- Dynamic HF de-esser ----
         Real hf_lp  = 0.0;
@@ -124,14 +144,17 @@ struct Preset_Neve1073
         Real ap2_x1 = 0.0, ap2_y1 = 0.0;
 
         // ===============================
-        // ✅ (1) Diffusion Bus paralelo
+        // Diffusion Bus paralelo
         // ===============================
-        static constexpr int kDiffN = 6; // 4..8 recomendado; 6 sweet spot
+        static constexpr int kDiffN = 6;
         Real diff_x1[kDiffN] = {0}, diff_y1[kDiffN] = {0};
-        Real diffFb   = 0.0; // feedback sample
-        Real diffDamp = 0.0; // LP dentro del loop (damping)
+        Real diffFb   = 0.0;
+        Real diffDamp = 0.0;
 
-        // ✅ (2) Phase tilt extra SOLO en el wet (estados separados)
+        // Diff HPF (feedback safety)
+        Real diffHP_lp = 0.0;
+
+        // Phase tilt extra SOLO en el wet (estados separados)
         Real wet_ap1_x1 = 0.0, wet_ap1_y1 = 0.0;
         Real wet_ap2_x1 = 0.0, wet_ap2_y1 = 0.0;
 
@@ -150,31 +173,40 @@ struct Preset_Neve1073
         // ---- Deterministic denorm helper ----
         uint32_t denormCount = 0u;
 
-        // ------------------------------------------------------------
-        // ✅ (PATCH) Smoothed knobs (evita zipper y permite rangos más agresivos)
-        Real tone1_sm = 0.5; // 0..1
-        Real tone2_sm = 0.5; // 0..1
+        // ---- Smoothed knobs ----
+        Real tone1_sm = 0.5;
+        Real tone2_sm = 0.5;
 
-        // ✅ (PATCH) “Air shelf” tipo 1073 (estado LP para extra shelf)
-        Real air_lp = 0.0;
+        // ---- Air shelf biquad (RBJ) ----
+        Biquad airShelf;
+        Real   airGain_sm = 0.0;
     };
 
     static inline void prepare (State& s, float sampleRateHz) noexcept
     {
         s.sr = (sampleRateHz > 1000.0f ? sampleRateHz : 192000.0f);
 
-        // Deterministic "tolerancia" por canal/instancia
+        // Deterministic seeds por instancia/canal
         {
             const uintptr_t u = (uintptr_t) (&s);
             uint32_t x = (uint32_t) ((u >> 4) ^ (u >> 13) ^ (u >> 21));
             x ^= (x << 13);
             x ^= (x >> 17);
             x ^= (x << 5);
-            const float r01 = (float) (x & 0xFFFFu) * (1.0f / 65535.0f);
-            s.chanTrim = (2.0f * r01) - 1.0f; // [-1..+1]
 
-            // driftPhase determinística por instancia/canal (sin RNG)
-            s.driftPhase = (Real) ((r01) * 2.0f * 3.14159265358979323846f);
+            const float r01 = (float) (x & 0xFFFFu) * (1.0f / 65535.0f);
+            s.chanTrim = (2.0f * r01) - 1.0f;
+
+            // driftPhase determinística
+            s.driftPhase = (Real) (r01 * 2.0f * 3.14159265358979323846f);
+
+            // split trims independientes
+            const uint32_t seed = x;
+            s.trimA = u32_to_bipolar(splitmix32(seed ^ 0xA1B2C3D4u));
+            s.trimB = u32_to_bipolar(splitmix32(seed ^ 0x1F2E3D4Cu));
+            s.trimC = u32_to_bipolar(splitmix32(seed ^ 0x55AA55AAu));
+            s.trimT = u32_to_bipolar(splitmix32(seed ^ 0xDEADBEEFu));
+
             s.denormCount = x ^ 0x9E3779B9u;
         }
 
@@ -185,7 +217,11 @@ struct Preset_Neve1073
     {
         s.envP = 0.0;
         s.env  = 0.0;
-        s.sagEnv = 0.0;
+
+        s.sagFast = 0.0;
+        s.sagSlow = 0.0;
+        s.sagEnv  = 0.0;
+        s.lf_lp   = 0.0;
 
         s.meas_x1 = 0.0;
         s.meas_y1 = 0.0;
@@ -195,6 +231,9 @@ struct Preset_Neve1073
 
         s.drift   = 0.0;
         s.driftLP = 0.0;
+
+        s.even_x1 = 0.0;
+        s.cub_x1  = 0.0;
 
         s.sub_lp = 0.0;
         s.preShelf_lp = 0.0;
@@ -208,6 +247,10 @@ struct Preset_Neve1073
 
         s.atanIn_x1  = 0.0;
         s.atanOut_x1 = 0.0;
+
+        s.trafoLF.reset();
+        s.trafoHF.reset();
+        s.trafoSig_sm = 0.0;
 
         s.hf_lp = 0.0;
         s.hfEnv = 0.0;
@@ -231,12 +274,13 @@ struct Preset_Neve1073
         s.ap1_x1 = s.ap1_y1 = 0.0;
         s.ap2_x1 = s.ap2_y1 = 0.0;
 
-        // ✅ Diffusion Bus reset
+        // Diffusion reset
         for (int i = 0; i < State::kDiffN; ++i) { s.diff_x1[i] = 0.0; s.diff_y1[i] = 0.0; }
-        s.diffFb = 0.0;
+        s.diffFb   = 0.0;
         s.diffDamp = 0.0;
+        s.diffHP_lp = 0.0;
 
-        // ✅ Wet phase-tilt reset
+        // Wet phase-tilt reset
         s.wet_ap1_x1 = s.wet_ap1_y1 = 0.0;
         s.wet_ap2_x1 = s.wet_ap2_y1 = 0.0;
 
@@ -248,10 +292,13 @@ struct Preset_Neve1073
         s.post1_lp  = 0.0;
         s.post2_lp  = 0.0;
 
-        // ✅ (PATCH) knob smoothing + air shelf reset
+        // knob smoothing
         s.tone1_sm = 0.5;
         s.tone2_sm = 0.5;
-        s.air_lp   = 0.0;
+
+        // air shelf
+        s.airShelf.reset();
+        s.airGain_sm = 0.0;
 
         s.denormCount ^= 0xA5A5A5A5u;
     }
@@ -262,15 +309,13 @@ struct Preset_Neve1073
         if (!std::isfinite (xIn))
             return 0.0f;
 
-        // Anti-denorm determinístico SOLO si cae a ultrapequeños
         if (std::fabs ((double) xIn) < 1.0e-20)
             xIn += (float) tinyNoiseDenormSafe (s);
 
         const Real sr = (Real) s.sr;
         Real x = (Real) xIn;
 
-        // ------------------------------------------------------------
-        // ✅ (PATCH) Knob smoothing (25–40 ms) + audio taper/curvas
+        // Knob smoothing (25–40 ms) + audio taper/curvas
         {
             const Real aK = alphaFromMsT ((Real) 35.0, sr);
             s.tone1_sm = onePoleLPT (s.tone1_sm, (Real) k.tone1_01, aK);
@@ -291,12 +336,12 @@ struct Preset_Neve1073
         const Real bright01 = pow01 (t2, (Real) 1.35);
         const Real dark01   = pow01 ((Real) 1.0 - t2, (Real) 1.35);
 
-        // ---- Tolerancias por canal (±1–3%) ----
-        const Real trimFc    = (Real) (1.0f + 0.015f * s.chanTrim);
-        const Real trimDrive = (Real) (1.0f + 0.020f * s.chanTrim);
-        const Real trimBias  = (Real) (1.0f + 0.030f * s.chanTrim);
+        // ---- Independent trims ----
+        const Real trimFc    = (Real) (1.0f + 0.015f * s.trimA);
+        const Real trimDrive = (Real) (1.0f + 0.020f * s.trimB);
+        const Real trimBias  = (Real) (1.0f + 0.030f * s.trimC);
+        const Real trimTrafo = (Real) (1.0f + 0.020f * s.trimT);
 
-        // ------------------------------------------------------------
         // 0) DC blocker (audio path)
         {
             const Real R = alphaFromHzT ((Real) 5.0, sr);
@@ -306,15 +351,14 @@ struct Preset_Neve1073
             x = y0;
         }
 
-        // ------------------------------------------------------------
-        // A) Calibración headroom real (-18 dBFS ≈ 0 VU)
+        // Calibración headroom real (-18 dBFS ≈ 0 VU)
         x *= (Real) kInCal;
 
-        // ------------------------------------------------------------
-        // 1) Detector perceptual + env + sag
+        // 1) Detector perceptual + env + sag (doble tiempo + LF weighting)
+        Real xm = 0.0;
         {
             const Real aHP = std::exp (-2.0 * kPi * ((Real) 90.0 / sr));
-            const Real xm  = onePoleHPT (s.meas_x1, s.meas_y1, x, aHP);
+            xm  = onePoleHPT (s.meas_x1, s.meas_y1, x, aHP);
 
             const Real p = xm * xm;
 
@@ -333,28 +377,39 @@ struct Preset_Neve1073
             const Real a = (inst > s.env) ? aAtk : aRel;
             s.env = a * s.env + (1.0 - a) * inst;
 
-            const Real sagMs = 260.0;
-            const Real aSag  = alphaFromMsT (sagMs, sr);
-            s.sagEnv = aSag * s.sagEnv + (1.0 - aSag) * inst;
-            s.sagEnv = clampT (s.sagEnv, (Real) 0.0, (Real) 16.0);
+            // LF weighting: low-end “tira” más de la fuente
+            {
+                const Real aLF = alphaFromHzT((Real) 180.0 * trimFc, sr);
+                s.lf_lp = onePoleLPT(s.lf_lp, xm, aLF);
+                const Real lfInst = std::fabs(s.lf_lp);
+
+                const Real weighted = inst + (Real) 0.55 * lfInst;
+
+                const Real aF = alphaFromMsT((Real) 35.0, sr);
+                const Real aS = alphaFromMsT((Real) 420.0, sr);
+
+                s.sagFast = aF * s.sagFast + (1.0 - aF) * weighted;
+                s.sagSlow = aS * s.sagSlow + (1.0 - aS) * weighted;
+
+                s.sagFast = clampT(s.sagFast, (Real)0, (Real)16);
+                s.sagSlow = clampT(s.sagSlow, (Real)0, (Real)16);
+
+                s.sagEnv = (Real) 0.55 * s.sagFast + (Real) 0.45 * s.sagSlow;
+            }
         }
 
         const Real env01 = clamp01T (s.env * (Real) 1.60);
-        const Real sag01 = clamp01T (s.sagEnv * (Real) 1.15);
+        const Real sag01 = clamp01T (s.sagEnv * (Real) 0.075); // escala “PSU feel”
 
-        // ------------------------------------------------------------
-        // ✅ (PATCH) Sag gain (más rango, más audible con Tone1 agresivo)
+        // Sag gain (más rango, más audible con Tone1 agresivo)
         {
-            const Real sagAmt = (Real) 0.07 + (Real) 0.26 * agg01; // PATCH
+            const Real sagAmt = (Real) 0.07 + (Real) 0.26 * agg01;
             const Real sagG   = 1.0 / (1.0 + sagAmt * (s.sagEnv * 1.25));
             x *= sagG;
         }
 
-        // ------------------------------------------------------------
-        // B) Asimetría “real” con drift determinístico (0 noise, sin RNG)
+        // Asimetría “real” con drift determinístico + ADAA even
         {
-            // LFO ultra lento 0.005..0.03 Hz (determinístico)
-            // suavecito -> un pelín más “vida”, agresivo -> más quieto
             Real fHz = (Real) 0.006 + (Real) 0.020 * ((Real) 0.25 + (Real) 0.75 * env01);
             fHz *= ((Real) 0.85 + (Real) 0.30 * relax01);
             fHz = clampT (fHz, (Real) 0.005, (Real) 0.030);
@@ -362,30 +417,28 @@ struct Preset_Neve1073
             s.driftPhase += (Real) (2.0 * kPi) * (fHz / sr);
             if (s.driftPhase > (Real) (2.0 * kPi)) s.driftPhase -= (Real) (2.0 * kPi);
 
-            const Real n = std::sin (s.driftPhase); // [-1..+1] determinístico
+            const Real n = std::sin (s.driftPhase);
 
-            // Suaviza aún más
             const Real aLP = alphaFromHzT ((Real) 0.03, sr);
             s.driftLP = onePoleLPT (s.driftLP, n, aLP);
 
-            // leak extra largo
-            const Real leakAlpha = std::exp (-1.0 / ((Real) 35.0 * sr)); // ~35s
+            const Real leakAlpha = std::exp (-1.0 / ((Real) 35.0 * sr));
             s.drift = s.drift * leakAlpha + (1.0 - leakAlpha) * s.driftLP;
             s.drift = clampT (s.drift, (Real) -1.0, (Real) 1.0);
 
             const Real baseEven =
                 ((Real) 0.0045 + (Real) 0.0140 * env01 + (Real) 0.0060 * sag01)
-                * (Real) (1.0f + 0.08f * s.chanTrim);
+                * (Real) (1.0f + 0.08f * s.trimC);
 
             Real evenMul = 1.0 + (Real) 0.35 * s.drift;
             evenMul = clampT (evenMul, (Real) 0.65, (Real) 1.35);
 
-            // ✅ (PATCH) Asimetría/even más contrastada por Tone1
             const Real evenAmt = baseEven * evenMul * ((Real) 0.55 + (Real) 1.25 * agg01);
-            x += evenAmt * (x * std::fabs (x));
+
+            // ADAA1 para x*abs(x)
+            x += evenAmt * adaaEven1(x, s.even_x1);
         }
 
-        // ------------------------------------------------------------
         // 2) Subsonic HPF
         {
             const Real fc = (Real) 18.0 * trimFc;
@@ -394,8 +447,7 @@ struct Preset_Neve1073
             x = x - s.sub_lp;
         }
 
-        // ------------------------------------------------------------
-        // 3) Pre-emphasis shelf
+        // 3) Pre-emphasis shelf (Tone2 forward)
         {
             const Real fc = ((Real) 4100.0 - (Real) 1300.0 * env01) * trimFc;
             const Real a  = alphaFromHzT (clampT (fc, (Real) 1800.0, (Real) 6500.0), sr);
@@ -403,11 +455,10 @@ struct Preset_Neve1073
             s.preShelf_lp = onePoleLPT (s.preShelf_lp, x, a);
             const Real highSh = x - s.preShelf_lp;
 
-            const Real shelfGain = (Real) 0.05 + (Real) 0.24 * env01;
+            const Real shelfGain = ((Real) 0.04 + (Real) 0.22 * env01) * ((Real) 0.90 + (Real) 0.30 * bright01);
             x = x + shelfGain * highSh;
         }
 
-        // ------------------------------------------------------------
         // 4) Split low/high
         Real low = 0.0;
         Real high = 0.0;
@@ -420,31 +471,34 @@ struct Preset_Neve1073
             high = x - low;
         }
 
-        // ------------------------------------------------------------
-        // 5) Drives por banda
+        // 5) Drives por banda (Macro Tone1/Tone2)
         {
-            const Real driveLo = ((Real) 1.00 + (Real) 0.38 * env01) * trimDrive;
-            const Real driveHi = ((Real) 1.00 + (Real) 0.92 * env01) * trimDrive;
+            Real driveLo = ((Real) 1.00 + (Real) 0.38 * env01) * trimDrive;
+            Real driveHi = ((Real) 1.00 + (Real) 0.92 * env01) * trimDrive;
+
+            // Macro: agresivo empuja más HIGH, relax empuja más LOW
+            driveHi *= (Real) (0.90 + 0.65 * agg01);
+            driveLo *= (Real) (0.95 + 0.45 * relax01);
+
+            // Macro Tone2: bright forward sutil en high drive
+            driveHi *= (Real) (0.95 + 0.18 * bright01);
 
             low  *= driveLo;
             high *= driveHi;
         }
 
-        // ------------------------------------------------------------
-        // 6) Trafo IN
+        // 6) Trafo IN (con trimTrafo sutil)
         low = transformerHystADAA_HQ (
             s.magIn, s.trafoIn_prevX, s.atanIn_x1,
             low, env01, sag01, sr,
-            (Real) 55.0 * trimFc,
+            (Real) 55.0 * trimFc * trimTrafo,
             (Real) 0.24,
             (Real) 2.08 * trimDrive,
             (Real) 0.012 * trimBias,
-            (Real) 0.14
+            (Real) (0.14 * (0.95 + 0.10 * trimTrafo))
         );
 
-        // ------------------------------------------------------------
         // 7) HIGH chain
-
         // 7.a) Mid-forward
         {
             const Real fcHi = ((Real) 2200.0 - (Real) 500.0 * env01) * trimFc;
@@ -464,7 +518,7 @@ struct Preset_Neve1073
             high = high + midBand * g;
         }
 
-        // 7.b) HF de-esser ultra rápido
+        // 7.b) HF de-esser ultra rápido (Tone2 modula release)
         Real hf01 = 0.0;
         {
             const Real fcMeas = (Real) 10000.0 * trimFc;
@@ -475,8 +529,11 @@ struct Preset_Neve1073
             const Real e  = std::fabs (hf);
 
             const Real aAtk = alphaFromMsT ((Real) 0.6, sr);
-            const Real aRel = alphaFromMsT ((Real) 18.0, sr);
-            const Real a    = (e > s.hfEnv) ? aAtk : aRel;
+            const Real relMsBase = (Real) 18.0;
+            const Real relMs = relMsBase * ((Real) 0.75 + (Real) 0.80 * dark01);
+            const Real aRel = alphaFromMsT (relMs, sr);
+
+            const Real a = (e > s.hfEnv) ? aAtk : aRel;
 
             s.hfEnv = a * s.hfEnv + (1.0 - a) * e;
             s.hfEnv = clampT (s.hfEnv, (Real) 0.0, (Real) 8.0);
@@ -484,16 +541,13 @@ struct Preset_Neve1073
             hf01 = clamp01T (s.hfEnv * (Real) 1.75);
         }
 
-        // ✅ (PATCH) De-esser más contrastado con Tone2 (dark controla MUCHO más)
         hf01 *= (Real) (0.30 + 1.35 * dark01);
 
         // 7.c) Pre-edge LP
         {
             Real fc = ((Real) 55000.0 - (Real) 26000.0 * env01 - (Real) 9000.0 * sag01) * trimFc;
 
-            // ✅ (PATCH) más rango bright/dark en preEdge
             fc *= (Real) (0.58 + 0.95 * bright01);
-
             fc *= (1.0 - (Real) 0.32 * hf01);
 
             const Real a  = alphaFromHzT (clampT (fc, (Real) 16000.0, (Real) 90000.0), sr);
@@ -502,13 +556,14 @@ struct Preset_Neve1073
             high = s.preEdge_lp;
         }
 
-        // 7.d) Slew limiting
+        // 7.d) Soft-slew limiting (tanh)
         {
             Real slewMax = (Real) 1.15 - (Real) 0.55 * env01 - (Real) 0.10 * sag01;
             slewMax = clampT (slewMax, (Real) 0.25, (Real) 1.35);
             slewMax *= ((Real) 0.85 + (Real) 0.35 * bright01);
 
-            const Real dy = clampT (high - s.slew_y, -slewMax, +slewMax);
+            const Real dx = high - s.slew_y;
+            const Real dy = slewMax * std::tanh(dx / (slewMax + (Real) 1.0e-12));
             s.slew_y += dy;
             high = s.slew_y;
         }
@@ -527,7 +582,7 @@ struct Preset_Neve1073
             y1 = s.inter_hf;
         }
 
-        // 7.g) Amp stage 2 (ADAA1)
+        // 7.g) Amp stage 2 (ADAA1 + cubic ADAA1)
         Real y2 = ampStage2ADAA (s, y1, env01, sag01);
 
         // 7.h) De-nasal post
@@ -551,20 +606,37 @@ struct Preset_Neve1073
 
         Real y = low + y2;
 
-        // ------------------------------------------------------------
-        // 8) Trafo OUT
+        // 8) Trafo OUT (con trimTrafo sutil)
         y = transformerHystADAA_HQ (
             s.magOut, s.trafoOut_prevX, s.atanOut_x1,
             y, env01, sag01, sr,
-            (Real) 42.0 * trimFc,
+            (Real) 42.0 * trimFc * trimTrafo,
             (Real) 0.19,
             (Real) 1.88 * trimDrive,
             (Real) 0.008 * trimBias,
-            (Real) 0.12
+            (Real) (0.12 * (0.95 + 0.10 * trimTrafo))
         );
 
-        // ------------------------------------------------------------
-        // C) Allpass “3D glue” (base)
+        // 8.b) “Firma” de trafo: LF bump + HF resonancia/caída suave (dependiente de drive)
+        {
+            const Real sigTarget = clamp01T((Real) 0.15 + (Real) 0.85 * ((Real)0.65*env01 + (Real)0.35*sag01));
+            const Real aS = alphaFromMsT((Real) 60.0, sr);
+            s.trafoSig_sm = onePoleLPT(s.trafoSig_sm, sigTarget, aS);
+
+            // LF bump 40–90 Hz, +0..~1 dB
+            const Real lfFc   = ((Real) 55.0 + (Real) 25.0 * s.trafoSig_sm) * trimFc;
+            const Real lfGain = (Real) 0.15 + (Real) 0.85 * s.trafoSig_sm;
+            biquadPeakRBJ(s.trafoLF, sr, lfFc, lfGain, (Real) 0.75);
+            y = s.trafoLF.process(y);
+
+            // HF “capacitancia”: small reson/tilt (puede ser negativo con drive)
+            const Real hfFc   = ((Real) 19000.0 + (Real) 6000.0 * bright01) * trimFc;
+            const Real hfGain = ((Real) 0.35 * bright01) - ((Real) 0.55 * s.trafoSig_sm);
+            biquadPeakRBJ(s.trafoHF, sr, hfFc, hfGain, (Real) 0.9);
+            y = s.trafoHF.process(y);
+        }
+
+        // C) Allpass “3D glue” (coef negativo permitido)
         {
             Real f1 = ((Real) 650.0  + (Real) 950.0  * env01 + (Real) 250.0 * sag01) * trimFc;
             Real f2 = ((Real) 1800.0 + (Real) 1400.0 * env01 + (Real) 350.0 * sag01) * trimFc;
@@ -583,8 +655,7 @@ struct Preset_Neve1073
             y = allpass1T (y, s.ap2_x1, s.ap2_y1, a2);
         }
 
-        // ------------------------------------------------------------
-        // ✅ Diffusion Bus paralelo (PATCH: mucho más sensible a Tone1 + halo más 1073)
+        // Diffusion Bus paralelo (HPF fb + softclip loop + power crossfade)
         {
             const Real dry = y;
 
@@ -594,11 +665,10 @@ struct Preset_Neve1073
 
             const Real relax2 = relax * relax;
 
-            // ✅ (PATCH) Mix y feedback con más viaje
-            Real diffMix = (Real) 0.00 + (Real) 0.52 * relax2; // 0..0.52
+            Real diffMix = (Real) 0.00 + (Real) 0.52 * relax2;
             diffMix = clampT (diffMix, (Real) 0.0, (Real) 0.55);
 
-            Real fb = (Real) 0.00 + (Real) 0.18 * relax2;      // 0..0.18
+            Real fb = (Real) 0.00 + (Real) 0.18 * relax2;
             fb *= (Real) (0.80 + 0.35 * dark);
             fb = clampT (fb, (Real) 0.0, (Real) 0.22);
 
@@ -607,7 +677,6 @@ struct Preset_Neve1073
             dampFc = clampT (dampFc, (Real) 3000.0, (Real) (0.45 * sr));
             const Real aDamp = alphaFromHzT (dampFc, sr);
 
-            // ✅ (PATCH) SmearMul más profundo y sensible a Tone1
             const Real smearMul =
                 ((Real) 1.20 - (Real) 0.55 * relax) *
                 ((Real) 0.90 + (Real) 0.35 * bright);
@@ -616,9 +685,17 @@ struct Preset_Neve1073
                 (Real) 250.0, (Real) 520.0, (Real) 930.0,
                 (Real) 1500.0, (Real) 2400.0, (Real) 3800.0
             };
-
             for (int i = 0; i < State::kDiffN; ++i)
                 fcList[i] = fcList[i] * smearMul * trimFc;
+
+            // HPF ultralento en feedback (20–40 Hz)
+            {
+                const Real fcHP = (Real) 25.0 * trimFc;
+                const Real aHP  = alphaFromHzT(fcHP, sr);
+                s.diffHP_lp = onePoleLPT(s.diffHP_lp, s.diffFb, aHP);
+                const Real fbHP = s.diffFb - s.diffHP_lp;
+                s.diffFb = fbHP;
+            }
 
             // Loop input
             Real wetIn = dry + s.diffFb;
@@ -628,15 +705,22 @@ struct Preset_Neve1073
             wetIn = s.diffDamp;
 
             // Diffusion (loop signal)
-            const Real wetLoop = runDiffuserAllpassCascade (s, wetIn, fcList, sr);
+            Real wetLoop = runDiffuserAllpassCascade (s, wetIn, fcList, sr);
 
-            // Update feedback from loop signal (no tilt aquí)
+            // soft safety en loop
+            {
+                const Real ksc = (Real) 1.2 + (Real) 1.0 * relax01;
+                wetLoop = softClipTanh(wetLoop, ksc);
+            }
+
+            // Update feedback + denorm guard
             s.diffFb = clampT (wetLoop * fb, (Real) -0.35, (Real) 0.35);
+            if (std::fabs(s.diffFb) < (Real) 1.0e-20)
+                s.diffFb += (Real) tinyNoiseDenormSafe(s);
 
-            // Wet output signal = loop + phase tilt extra (solo salida)
+            // Wet output = loop + phase tilt extra (solo salida)
             Real wet = wetLoop;
 
-            // Phase tilt extra solo en wet (más profundidad sin “room”)
             {
                 Real fA = ((Real) 900.0  + (Real) 900.0  * relax) * trimFc;
                 Real fB = ((Real) 2600.0 + (Real) 1400.0 * relax) * trimFc;
@@ -651,14 +735,17 @@ struct Preset_Neve1073
                 wet = allpass1T (wet, s.wet_ap2_x1, s.wet_ap2_y1, aB);
             }
 
-            // Trim ligero para no inflar nivel
+            // Trim ligero
             const Real wetTrim = (Real) (0.92 + 0.08 * bright);
             wet *= wetTrim;
 
-            y = dry * ((Real) 1 - diffMix) + wet * diffMix;
+            // Loudness constancy: power crossfade
+            const Real m  = clampT(diffMix, (Real) 0, (Real) 0.85);
+            const Real gW = std::sqrt(m);
+            const Real gD = std::sqrt((Real) 1 - m);
+            y = dry * gD + wet * gW;
         }
 
-        // ------------------------------------------------------------
         // 9) Loading LP dinámico
         {
             Real fc = ((Real) 65000.0 - (Real) 38000.0 * ((Real) 0.65 * env01 + (Real) 0.35 * sag01)) * trimFc;
@@ -692,8 +779,6 @@ struct Preset_Neve1073
         // 11) De-fizz dinámico
         {
             Real fc = ((Real) 19500.0 - (Real) 12000.0 * env01) * trimFc;
-
-            // ✅ (PATCH) más rango bright/dark en de-fizz
             fc *= (Real) (0.58 + 0.95 * bright01);
 
             const Real a  = alphaFromHzT (clampT (fc, (Real) 6000.0, (Real) 24000.0), sr);
@@ -705,8 +790,6 @@ struct Preset_Neve1073
         // 12) Post HF damping 2 polos
         {
             Real fc = ((Real) 25500.0 - (Real) 16000.0 * env01) * trimFc;
-
-            // ✅ (PATCH) post damping más contrastado
             fc *= (Real) (0.65 + 0.90 * bright01);
 
             const Real a  = alphaFromHzT (clampT (fc, (Real) 8000.0, (Real) 32000.0), sr);
@@ -716,23 +799,21 @@ struct Preset_Neve1073
             y = s.post2_lp;
         }
 
-        // ------------------------------------------------------------
-        // ✅ (PATCH) Air shelf tipo 1073 (sutil, MUY audible y “fiel”)
+        // 2) Air shelf más auténtico: RBJ high-shelf con slope suave + smoothing gain
         {
+            const Real airDbTarget = ((Real) -0.8 * dark01) + ((Real) 1.8 * bright01);
+
+            const Real aG = alphaFromMsT((Real) 35.0, sr);
+            s.airGain_sm = onePoleLPT(s.airGain_sm, airDbTarget, aG);
+
             const Real fcAir = (Real) 12000.0 * trimFc;
-            const Real aAir  = alphaFromHzT (clampT (fcAir, (Real) 6000.0, (Real) (0.45 * sr)), sr);
+            const Real slope = (Real) 0.75;
 
-            s.air_lp = onePoleLPT (s.air_lp, y, aAir);
-            const Real hi = y - s.air_lp;
-
-            const Real airDb = ((Real) -0.8 * dark01) + ((Real) 1.8 * bright01); // -0.8..+1.8 dB
-            const Real g = dbToLinT (airDb) - (Real) 1.0;
-
-            y = y + hi * g;
+            biquadHighShelfRBJ(s.airShelf, sr, fcAir, s.airGain_sm, slope);
+            y = s.airShelf.process(y);
         }
 
-        // ------------------------------------------------------------
-        // A) Calibración de salida
+        // Calibración de salida
         y *= (Real) kOutCal;
 
         if (!std::isfinite (y))
@@ -770,6 +851,21 @@ private:
     // Calibración -18 dBFS ≈ 0 VU
     static constexpr float kInCal  = 7.943282347242814f;    // 10^(+18/20)
     static constexpr float kOutCal = 0.12589254117941673f;  // 10^(-18/20)
+
+    // ------------------ splitmix + bipolar helpers ------------------
+    static inline uint32_t splitmix32(uint32_t x) noexcept
+    {
+        x += 0x9E3779B9u;
+        x = (x ^ (x >> 16)) * 0x85EBCA6Bu;
+        x = (x ^ (x >> 13)) * 0xC2B2AE35u;
+        return x ^ (x >> 16);
+    }
+
+    static inline float u32_to_bipolar(uint32_t x) noexcept
+    {
+        const float r01 = (float)(x & 0xFFFFu) * (1.0f / 65535.0f);
+        return 2.0f * r01 - 1.0f;
+    }
 
     // ------------------ float clamp for legacy/stateless ------------------
     static inline float clampf (float v, float lo, float hi) noexcept
@@ -828,8 +924,7 @@ private:
         return std::exp ((T) 0.1151292546497022842 * db); // ln(10)/20
     }
 
-    // ------------------------------------------------------------
-    // ✅ (PATCH) curvas para “audio taper” y extremos más marcados
+    // ------------------ audio taper helpers ------------------
     static inline Real smoothstep01 (Real x) noexcept
     {
         x = clampT (x, (Real) 0.0, (Real) 1.0);
@@ -855,10 +950,16 @@ private:
     static inline T allpassCoefFromHzT (T fc, T sr) noexcept
     {
         const T safeSr = (sr > (T) 1 ? sr : (T) 1);
-        const T w = (T) kPi * (fc / safeSr);
+
+        // seguridad cerca de Nyquist
+        const T ratio = clampT(fc / safeSr, (T) 0, (T) 0.49);
+        const T w = (T) kPi * ratio;
+
         const T t = std::tan (w);
         const T a = ((T) 1 - t) / ((T) 1 + t);
-        return clampT (a, (T) 0, (T) 0.9999);
+
+        // ✅ permitir negativo (más carácter)
+        return clampT (a, (T) -0.9999, (T) 0.9999);
     }
 
     template <typename T>
@@ -870,7 +971,6 @@ private:
         return y;
     }
 
-    // ✅ Diffuser cascade helper
     static inline Real runDiffuserAllpassCascade (State& s, Real x, const Real* fcHz, Real sr) noexcept
     {
         for (int i = 0; i < State::kDiffN; ++i)
@@ -880,6 +980,106 @@ private:
             x = allpass1T (x, s.diff_x1[i], s.diff_y1[i], a);
         }
         return x;
+    }
+
+    // ------------------ soft clip ------------------
+    static inline Real softClipTanh(Real x, Real k) noexcept
+    {
+        const Real kk = clampT(k, (Real) 0.25, (Real) 8.0);
+        const Real n  = std::tanh(kk);
+        if (std::fabs(n) < (Real) 1.0e-18) return x;
+        return std::tanh(kk * x) / n;
+    }
+
+    // ------------------ RBJ biquads ------------------
+    static inline void biquadHighShelfRBJ(Biquad& q, Real sr, Real fc, Real gainDb, Real slopeS) noexcept
+    {
+        fc = clampT(fc, (Real) 10.0, (Real) (0.49 * sr));
+        slopeS = clampT(slopeS, (Real) 0.2, (Real) 2.0);
+
+        const Real A  = std::exp((Real) 0.057564627324851142 * gainDb); // ln(10)/40
+        const Real w0 = (Real) 2.0 * kPi * (fc / sr);
+        const Real cw = std::cos(w0);
+        const Real sw = std::sin(w0);
+
+        const Real alpha = sw * (Real) 0.5 * std::sqrt((A + (Real) 1.0/A) * ((Real) 1.0/slopeS - (Real) 1.0) + (Real) 2.0);
+        const Real beta  = (Real) 2.0 * std::sqrt(A) * alpha;
+
+        const Real b0 =    A*((A+1) + (A-1)*cw + beta);
+        const Real b1 = -2*A*((A-1) + (A+1)*cw);
+        const Real b2 =    A*((A+1) + (A-1)*cw - beta);
+        const Real a0 =       (A+1) - (A-1)*cw + beta;
+        const Real a1 =  2*((A-1) - (A+1)*cw);
+        const Real a2 =       (A+1) - (A-1)*cw - beta;
+
+        const Real invA0 = (Real) 1.0 / a0;
+
+        q.b0 = b0 * invA0;
+        q.b1 = b1 * invA0;
+        q.b2 = b2 * invA0;
+        q.a1 = a1 * invA0;
+        q.a2 = a2 * invA0;
+    }
+
+    static inline void biquadPeakRBJ(Biquad& q, Real sr, Real fc, Real gainDb, Real Q) noexcept
+    {
+        fc = clampT(fc, (Real) 10.0, (Real) (0.49 * sr));
+        Q  = clampT(Q,  (Real) 0.2,  (Real) 8.0);
+
+        const Real A  = std::exp((Real) 0.057564627324851142 * gainDb); // ln(10)/40
+        const Real w0 = (Real) 2.0 * kPi * (fc / sr);
+        const Real cw = std::cos(w0);
+        const Real sw = std::sin(w0);
+        const Real alpha = sw / ((Real) 2.0 * Q);
+
+        const Real b0 = (Real) 1.0 + alpha * A;
+        const Real b1 = (Real) -2.0 * cw;
+        const Real b2 = (Real) 1.0 - alpha * A;
+        const Real a0 = (Real) 1.0 + alpha / A;
+        const Real a1 = (Real) -2.0 * cw;
+        const Real a2 = (Real) 1.0 - alpha / A;
+
+        const Real invA0 = (Real) 1.0 / a0;
+
+        q.b0 = b0 * invA0;
+        q.b1 = b1 * invA0;
+        q.b2 = b2 * invA0;
+        q.a1 = a1 * invA0;
+        q.a2 = a2 * invA0;
+    }
+
+    // ------------------ ADAA for even/cubic ------------------
+    static inline Real F_even(Real x) noexcept
+    {
+        return ((Real) 1.0 / 3.0) * std::fabs(x) * x * x;
+    }
+
+    static inline Real adaaEven1(Real x, Real& x1) noexcept
+    {
+        const Real d = x - x1;
+        Real y;
+        if (std::fabs(d) > (Real) 1.0e-12)
+            y = (F_even(x) - F_even(x1)) / d;
+        else
+            y = x * std::fabs(x);
+
+        x1 = x;
+        return y;
+    }
+
+    static inline Real F_cubic(Real x) noexcept { return ((Real) 0.25) * x * x * x * x; }
+
+    static inline Real adaaCubic1(Real x, Real& x1) noexcept
+    {
+        const Real d = x - x1;
+        Real y;
+        if (std::fabs(d) > (Real) 1.0e-12)
+            y = (F_cubic(x) - F_cubic(x1)) / d;
+        else
+            y = x * x * x;
+
+        x1 = x;
+        return y;
     }
 
     // ------------------ ADAA helpers ------------------
@@ -1135,7 +1335,10 @@ private:
         Real y = adaaTanh1T (pre, s.amp2_x1, k2);
 
         const Real t = pre;
-        y += ((Real) 0.004 + (Real) 0.014 * env01) * (t * t * t);
+
+        // ADAA1 para cubic (t^3)
+        const Real c = ((Real) 0.004 + (Real) 0.014 * env01);
+        y += c * adaaCubic1(t, s.cub_x1);
 
         y = (Real) 0.88 * y + (Real) 0.12 * ((Real) 0.63661977236758134308 * std::atan ((Real) 2.3 * y));
         y = lowLevelBlendT (x, y, (Real) 0.24);
