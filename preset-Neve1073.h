@@ -10,8 +10,16 @@
 // 4) Anti-aliasing extra: ADAA1 para even (x*abs(x)) y cubic (t^3) + soft-slew
 // 5) Diffusion Bus: HPF feedback + softclip loop + denorm guard + mezcla power-constancy
 // 6) Macro Tone1/Tone2: redistribución drive low/high + de-esser release + preShelf forward
-// 7) Sag “power supply”: doble tiempo + weighting LF
+// 7) Sag “power supply”: doble tiempo + weighting LF (FIX: LF weight usa x, NO xm)
 // 8) Tolerancias: trims separados (fc/drive/bias/trafo) con seeds determinísticas
+//
+// 🔧 OPTIMIZACIONES / MEJORAS IMPLEMENTADAS:
+// A) Sag LF-weighting FIX: lf_lp alimentado con x (post DC-block) en vez de xm (HPF 90 Hz)
+// B) Biquads control-rate: update coefs cada 32 samples (airShelf + trafoLF/trafoHF)
+// C) Coef smoothing: rampa lineal de coefs durante 32 samples (evita zipper/phase wobble)
+// D) Diffusion bus extra safety:
+//    D1) RMS governor suave dentro del loop
+//    D2) DC guard dentro del loop (HPF 8 Hz aprox)
 
 #include "funciones.h"
 
@@ -33,13 +41,66 @@ struct Preset_Neve1073
     // ------------------ Biquad helper ------------------
     struct Biquad
     {
+        // current coefs
         Real b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+
+        // targets + per-sample increments (coef smoothing)
+        Real tb0 = 1, tb1 = 0, tb2 = 0, ta1 = 0, ta2 = 0;
+        Real db0 = 0, db1 = 0, db2 = 0, da1 = 0, da2 = 0;
+        uint32_t ramp = 0;
+
+        // state
         Real z1 = 0, z2 = 0;
 
-        inline void reset() noexcept { z1 = z2 = 0; }
+        inline void reset() noexcept
+        {
+            z1 = z2 = 0;
+            tb0 = b0; tb1 = b1; tb2 = b2; ta1 = a1; ta2 = a2;
+            db0 = db1 = db2 = da1 = da2 = 0;
+            ramp = 0;
+        }
+
+        inline void setTargetCoeffs(Real nb0, Real nb1, Real nb2, Real na1, Real na2, uint32_t rampSamples) noexcept
+        {
+            tb0 = nb0; tb1 = nb1; tb2 = nb2; ta1 = na1; ta2 = na2;
+
+            if (rampSamples == 0u)
+            {
+                b0 = tb0; b1 = tb1; b2 = tb2; a1 = ta1; a2 = ta2;
+                db0 = db1 = db2 = da1 = da2 = 0;
+                ramp = 0u;
+                return;
+            }
+
+            // linear ramp from current to target
+            const Real invN = (Real) (1.0 / (Real) rampSamples);
+            db0 = (tb0 - b0) * invN;
+            db1 = (tb1 - b1) * invN;
+            db2 = (tb2 - b2) * invN;
+            da1 = (ta1 - a1) * invN;
+            da2 = (ta2 - a2) * invN;
+            ramp = rampSamples;
+        }
+
+        inline void tick() noexcept
+        {
+            if (ramp == 0u) return;
+
+            b0 += db0; b1 += db1; b2 += db2; a1 += da1; a2 += da2;
+            ramp--;
+
+            if (ramp == 0u)
+            {
+                // snap to exact target (avoid drift)
+                b0 = tb0; b1 = tb1; b2 = tb2; a1 = ta1; a2 = ta2;
+                db0 = db1 = db2 = da1 = da2 = 0;
+            }
+        }
 
         inline Real process(Real x) noexcept
         {
+            tick();
+
             // Transposed Direct Form II
             const Real y = b0 * x + z1;
             z1 = b1 * x - a1 * y + z2;
@@ -154,6 +215,11 @@ struct Preset_Neve1073
         // Diff HPF (feedback safety)
         Real diffHP_lp = 0.0;
 
+        // ✅ extra safety: RMS governor + DC guard dentro del loop
+        Real diffRms    = 0.0;
+        Real diffDC_x1  = 0.0;
+        Real diffDC_y1  = 0.0;
+
         // Phase tilt extra SOLO en el wet (estados separados)
         Real wet_ap1_x1 = 0.0, wet_ap1_y1 = 0.0;
         Real wet_ap2_x1 = 0.0, wet_ap2_y1 = 0.0;
@@ -180,6 +246,9 @@ struct Preset_Neve1073
         // ---- Air shelf biquad (RBJ) ----
         Biquad airShelf;
         Real   airGain_sm = 0.0;
+
+        // ✅ Biquad update counter (control-rate)
+        uint32_t biquadCtr = 0u;
     };
 
     static inline void prepare (State& s, float sampleRateHz) noexcept
@@ -280,6 +349,10 @@ struct Preset_Neve1073
         s.diffDamp = 0.0;
         s.diffHP_lp = 0.0;
 
+        s.diffRms   = 0.0;
+        s.diffDC_x1 = 0.0;
+        s.diffDC_y1 = 0.0;
+
         // Wet phase-tilt reset
         s.wet_ap1_x1 = s.wet_ap1_y1 = 0.0;
         s.wet_ap2_x1 = s.wet_ap2_y1 = 0.0;
@@ -299,6 +372,9 @@ struct Preset_Neve1073
         // air shelf
         s.airShelf.reset();
         s.airGain_sm = 0.0;
+
+        // biquad control-rate ctr
+        s.biquadCtr = 0u;
 
         s.denormCount ^= 0xA5A5A5A5u;
     }
@@ -342,6 +418,10 @@ struct Preset_Neve1073
         const Real trimBias  = (Real) (1.0f + 0.030f * s.trimC);
         const Real trimTrafo = (Real) (1.0f + 0.020f * s.trimT);
 
+        // ✅ biquad control-rate update tick (cada 32 samples)
+        const bool doBiquadUpdate = ((++s.biquadCtr & 31u) == 0u);
+        constexpr uint32_t kBiquadRampN = 32u; // rampa = periodo
+
         // 0) DC blocker (audio path)
         {
             const Real R = alphaFromHzT ((Real) 5.0, sr);
@@ -357,6 +437,14 @@ struct Preset_Neve1073
         // 1) Detector perceptual + env + sag (doble tiempo + LF weighting)
         Real xm = 0.0;
         {
+            // ✅ FIX LF-weight: usa x (post-DC) ANTES de HPF medición
+            Real lfInst = 0.0;
+            {
+                const Real aLF = alphaFromHzT((Real) 180.0 * trimFc, sr);
+                s.lf_lp = onePoleLPT(s.lf_lp, x, aLF);     // <-- usa x, NO xm
+                lfInst = std::fabs(s.lf_lp);
+            }
+
             const Real aHP = std::exp (-2.0 * kPi * ((Real) 90.0 / sr));
             xm  = onePoleHPT (s.meas_x1, s.meas_y1, x, aHP);
 
@@ -379,10 +467,6 @@ struct Preset_Neve1073
 
             // LF weighting: low-end “tira” más de la fuente
             {
-                const Real aLF = alphaFromHzT((Real) 180.0 * trimFc, sr);
-                s.lf_lp = onePoleLPT(s.lf_lp, xm, aLF);
-                const Real lfInst = std::fabs(s.lf_lp);
-
                 const Real weighted = inst + (Real) 0.55 * lfInst;
 
                 const Real aF = alphaFromMsT((Real) 35.0, sr);
@@ -623,16 +707,22 @@ struct Preset_Neve1073
             const Real aS = alphaFromMsT((Real) 60.0, sr);
             s.trafoSig_sm = onePoleLPT(s.trafoSig_sm, sigTarget, aS);
 
-            // LF bump 40–90 Hz, +0..~1 dB
-            const Real lfFc   = ((Real) 55.0 + (Real) 25.0 * s.trafoSig_sm) * trimFc;
-            const Real lfGain = (Real) 0.15 + (Real) 0.85 * s.trafoSig_sm;
-            biquadPeakRBJ(s.trafoLF, sr, lfFc, lfGain, (Real) 0.75);
-            y = s.trafoLF.process(y);
+            if (doBiquadUpdate)
+            {
+                // LF bump 40–90 Hz, +0..~1 dB
+                const Real lfFc   = ((Real) 55.0 + (Real) 25.0 * s.trafoSig_sm) * trimFc;
+                const Real lfGain = (Real) 0.15 + (Real) 0.85 * s.trafoSig_sm;
 
-            // HF “capacitancia”: small reson/tilt (puede ser negativo con drive)
-            const Real hfFc   = ((Real) 19000.0 + (Real) 6000.0 * bright01) * trimFc;
-            const Real hfGain = ((Real) 0.35 * bright01) - ((Real) 0.55 * s.trafoSig_sm);
-            biquadPeakRBJ(s.trafoHF, sr, hfFc, hfGain, (Real) 0.9);
+                biquadPeakRBJ(s.trafoLF, sr, lfFc, lfGain, (Real) 0.75, kBiquadRampN);
+
+                // HF “capacitancia”: small reson/tilt (puede ser negativo con drive)
+                const Real hfFc   = ((Real) 19000.0 + (Real) 6000.0 * bright01) * trimFc;
+                const Real hfGain = ((Real) 0.35 * bright01) - ((Real) 0.55 * s.trafoSig_sm);
+
+                biquadPeakRBJ(s.trafoHF, sr, hfFc, hfGain, (Real) 0.9, kBiquadRampN);
+            }
+
+            y = s.trafoLF.process(y);
             y = s.trafoHF.process(y);
         }
 
@@ -713,6 +803,23 @@ struct Preset_Neve1073
                 wetLoop = softClipTanh(wetLoop, ksc);
             }
 
+            // ✅ 4.a) RMS governor suave (safety net)
+            {
+                const Real aR = alphaFromMsT((Real) 50.0, sr);
+                s.diffRms = onePoleLPT(s.diffRms, wetLoop * wetLoop, aR);
+                const Real rms = std::sqrt(s.diffRms + (Real) 1.0e-18);
+
+                const Real target = (Real) 0.25; // ~ -12 dBFS interno
+                const Real g = (rms > target) ? (target / rms) : (Real) 1.0;
+                wetLoop *= g;
+            }
+
+            // ✅ 4.b) DC guard dentro del loop (HPF 8 Hz)
+            {
+                const Real aHPdc = alphaFromHzT((Real) 8.0 * trimFc, sr);
+                wetLoop = onePoleHPT(s.diffDC_x1, s.diffDC_y1, wetLoop, aHPdc);
+            }
+
             // Update feedback + denorm guard
             s.diffFb = clampT (wetLoop * fb, (Real) -0.35, (Real) 0.35);
             if (std::fabs(s.diffFb) < (Real) 1.0e-20)
@@ -790,7 +897,7 @@ struct Preset_Neve1073
         // 12) Post HF damping 2 polos
         {
             Real fc = ((Real) 25500.0 - (Real) 16000.0 * env01) * trimFc;
-            fc *= (Real) (0.65 + 0.90 * bright01);
+            fc *= (Real) (0.65 + (Real) 0.90 * bright01);
 
             const Real a  = alphaFromHzT (clampT (fc, (Real) 8000.0, (Real) 32000.0), sr);
 
@@ -809,7 +916,10 @@ struct Preset_Neve1073
             const Real fcAir = (Real) 12000.0 * trimFc;
             const Real slope = (Real) 0.75;
 
-            biquadHighShelfRBJ(s.airShelf, sr, fcAir, s.airGain_sm, slope);
+            // ✅ coefs update cada 32 samples + ramp 32
+            if (doBiquadUpdate)
+                biquadHighShelfRBJ(s.airShelf, sr, fcAir, s.airGain_sm, slope, kBiquadRampN);
+
             y = s.airShelf.process(y);
         }
 
@@ -992,7 +1102,7 @@ private:
     }
 
     // ------------------ RBJ biquads ------------------
-    static inline void biquadHighShelfRBJ(Biquad& q, Real sr, Real fc, Real gainDb, Real slopeS) noexcept
+    static inline void biquadHighShelfRBJ(Biquad& q, Real sr, Real fc, Real gainDb, Real slopeS, uint32_t rampSamples) noexcept
     {
         fc = clampT(fc, (Real) 10.0, (Real) (0.49 * sr));
         slopeS = clampT(slopeS, (Real) 0.2, (Real) 2.0);
@@ -1014,14 +1124,17 @@ private:
 
         const Real invA0 = (Real) 1.0 / a0;
 
-        q.b0 = b0 * invA0;
-        q.b1 = b1 * invA0;
-        q.b2 = b2 * invA0;
-        q.a1 = a1 * invA0;
-        q.a2 = a2 * invA0;
+        q.setTargetCoeffs(
+            b0 * invA0,
+            b1 * invA0,
+            b2 * invA0,
+            a1 * invA0,
+            a2 * invA0,
+            rampSamples
+        );
     }
 
-    static inline void biquadPeakRBJ(Biquad& q, Real sr, Real fc, Real gainDb, Real Q) noexcept
+    static inline void biquadPeakRBJ(Biquad& q, Real sr, Real fc, Real gainDb, Real Q, uint32_t rampSamples) noexcept
     {
         fc = clampT(fc, (Real) 10.0, (Real) (0.49 * sr));
         Q  = clampT(Q,  (Real) 0.2,  (Real) 8.0);
@@ -1041,11 +1154,14 @@ private:
 
         const Real invA0 = (Real) 1.0 / a0;
 
-        q.b0 = b0 * invA0;
-        q.b1 = b1 * invA0;
-        q.b2 = b2 * invA0;
-        q.a1 = a1 * invA0;
-        q.a2 = a2 * invA0;
+        q.setTargetCoeffs(
+            b0 * invA0,
+            b1 * invA0,
+            b2 * invA0,
+            a1 * invA0,
+            a2 * invA0,
+            rampSamples
+        );
     }
 
     // ------------------ ADAA for even/cubic ------------------
@@ -1346,6 +1462,7 @@ private:
         return clampT (y, (Real) -1.35, (Real) 1.35);
     }
 };
+
 
 
 
