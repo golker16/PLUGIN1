@@ -5,6 +5,7 @@
 
 #include <JuceHeader.h>
 #include <cmath>
+#include <complex>   // ✅ (A) requerido para mapeo de biquads (zeros/poles) entre sample rates
 
 //------------------------------------------------------------------------------
 // Assets / BinaryData
@@ -58,20 +59,7 @@ inline float clamp01 (float x) noexcept
 // Soft clip final "safety"
 inline float softClipSafety (float x) noexcept
 {
-    // Safety final (NO saturador con make-up).
-    // Objetivo:
-    // - Mantener 1:1 (sin cambios) lejos del techo.
-    // - Evitar hard-clip (jlimit) porque genera armónicos muy altos -> aliasing.
-    // - Knee corto: empieza a comprimir un poco antes de ±1 y asintota a ±1.
-    //
-    // Mapeo:
-    // - |x| <= kneeStart  -> y = x (perfectamente lineal)
-    // - |x|  > kneeStart  -> y = kneeStart + (1-kneeStart) * (2/pi)*atan( (pi/2) * (|x|-kneeStart)/(1-kneeStart) )
-    //
-    // Nota: La escala (pi/2) asegura pendiente ~= 1 justo al inicio del knee,
-    // evitando un "salto" brusco de derivada.
-
-    constexpr float kneeStart = 0.98f;              // empieza a comprimir aquí
+    constexpr float kneeStart = 0.98f;
     constexpr float one       = 1.0f;
 
     const float ax = std::abs (x);
@@ -81,12 +69,12 @@ inline float softClipSafety (float x) noexcept
     const float sign = (x >= 0.0f ? 1.0f : -1.0f);
 
     const float kneeRange = juce::jmax (1.0e-6f, one - kneeStart);
-    const float t = ax - kneeStart; // excedente por encima del knee
+    const float t = ax - kneeStart;
 
-    const float scaled = juce::MathConstants<float>::halfPi * (t / kneeRange); // (pi/2)*t/(1-kneeStart)
-    const float soft   = (2.0f / juce::MathConstants<float>::pi) * std::atan (scaled); // 0..1
+    const float scaled = juce::MathConstants<float>::halfPi * (t / kneeRange);
+    const float soft   = (2.0f / juce::MathConstants<float>::pi) * std::atan (scaled);
 
-    const float y = kneeStart + kneeRange * soft; // -> 1 asintótico
+    const float y = kneeStart + kneeRange * soft;
     return sign * juce::jlimit (0.0f, 1.0f, y);
 }
 
@@ -104,11 +92,9 @@ inline float mapDriveDb (float x01) noexcept
     const float maxAggDb   = 36.0f; // izquierda agresivo
     const float maxRelaxDb = 12.0f; // derecha relajado
 
-    // IZQUIERDA (s<0) => agresivo (GAIN +dB)
     if (s < 0.0f)
         return +maxAggDb * a2;
 
-    // DERECHA (s>=0) => relajado (GAIN -dB)
     return -maxRelaxDb * a2;
 }
 
@@ -125,11 +111,9 @@ inline float mapToneTiltDb (float t01) noexcept
     const float maxBrightDb = 5.0f; // derecha
     const float maxDarkDb   = 6.0f; // izquierda
 
-    // DERECHA (s>0) => BRIGHT (+dB)
     if (s > 0.0f)
         return +maxBrightDb * a;
 
-    // IZQUIERDA (s<=0) => DARK (-dB)
     return -maxDarkDb * a;
 }
 
@@ -292,7 +276,12 @@ private:
 };
 
 //==============================================================================
-// AutoGainExact (v3 ULTRA): iguala "volumen percibido" (RMS con HP) por MUESTRA.
+// AutoGainExact (v4 MASTERING): K-weighting + ventana momentary (~400ms) + gate con hold
+//
+// - K-weighting real (2 biquads): shelf + HP (coef base ITU a 48k)
+// - Recalcula coef para cualquier SR via mapeo z/p -> s (inverse bilinear @48k) -> z (bilinear @SR)
+// - Ventana tipo momentary: EMA con tau=400ms (IIR cercano)
+// - Gate loudness style -70 dB + HOLD 150 ms para evitar “respirar” en pausas
 class AutoGainExact
 {
 public:
@@ -300,12 +289,18 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
+        // defaults “mastering”
         setClampDb (-60.0f, +24.0f);
-        setGateDb  (-90.0f);
-        setMeasurementWindowMs (12.0f);
+        setGateDb  (-70.0f);               // ✅ (B) más estándar loudness gate
+        setGateHoldMs (150.0f);            // ✅ (B) hold para pausas/transientes
+        setMeasurementWindowMs (400.0f);   // ✅ (B) momentary ~400ms
+
         setGainSmoothingMs (0.30f, 6.0f);
         setReturnToUnityMs (220.0f);
-        setMeasureHighpassHz (70.0f);
+
+        // preparar K-weighting (coef dependientes de SR)
+        inK.prepare (sr);
+        outK.prepare (sr);
 
         reset();
     }
@@ -318,21 +313,23 @@ public:
         compGain   = 1.0f;
         targetGain = 1.0f;
 
-        in_hp_x1[0] = in_hp_x1[1] = 0.0f;
-        in_hp_y1[0] = in_hp_y1[1] = 0.0f;
-        out_hp_x1[0] = out_hp_x1[1] = 0.0f;
-        out_hp_y1[0] = out_hp_y1[1] = 0.0f;
+        gateHoldRemaining = 0;
+
+        inK.reset();
+        outK.reset();
     }
 
     float getGain() const noexcept { return compGain; }
 
     inline float processStereo (float dryL, float dryR, float outLpre, float outRpre) noexcept
     {
-        const float inL  = measureHP (dryL,    0, in_hp_x1,  in_hp_y1);
-        const float inR  = measureHP (dryR,    1, in_hp_x1,  in_hp_y1);
-        const float outL = measureHP (outLpre, 0, out_hp_x1, out_hp_y1);
-        const float outR = measureHP (outRpre, 1, out_hp_x1, out_hp_y1);
+        // 1) K-weighting aplicado a DRY y a OUT (pre makeup)
+        const float inL  = inK.process (dryL,    0);
+        const float inR  = inK.process (dryR,    1);
+        const float outL = outK.process (outLpre, 0);
+        const float outR = outK.process (outRpre, 1);
 
+        // 2) energía (power) y ventana momentary (EMA)
         const float pIn  = 0.5f * (inL  * inL  + inR  * inR);
         const float pOut = 0.5f * (outL * outL + outR * outR);
 
@@ -343,6 +340,10 @@ public:
 
         if (gateOk)
         {
+            // refresca hold
+            gateHoldRemaining = gateHoldSamples;
+
+            // objetivo = sqrt(in/out)
             const float ratio = inEnv / (outEnv + 1.0e-20f);
             float g = std::sqrt (ratio);
             g = juce::jlimit (minGain, maxGain, g);
@@ -350,9 +351,20 @@ public:
         }
         else
         {
-            targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
+            // hold: no “respires” con silencios/pausas cortas
+            if (gateHoldRemaining > 0)
+            {
+                --gateHoldRemaining;
+                // targetGain se mantiene (no vuelve a unity todavía)
+            }
+            else
+            {
+                // return to unity suave
+                targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
+            }
         }
 
+        // smoothing attack/release
         const bool needDown = (targetGain < compGain);
         const float a = needDown ? gainAttackAlpha : gainReleaseAlpha;
         compGain = a * compGain + (1.0f - a) * targetGain;
@@ -360,6 +372,7 @@ public:
         return compGain;
     }
 
+    // ---------------------- setters ----------------------
     void setClampDb (float minDb, float maxDb)
     {
         minGain = juce::Decibels::decibelsToGain (minDb);
@@ -370,6 +383,14 @@ public:
     {
         const float gateLin = juce::Decibels::decibelsToGain (gateDb);
         gatePow = gateLin * gateLin;
+    }
+
+    void setGateHoldMs (float ms)
+    {
+        const float t = juce::jmax (0.0f, ms) * 0.001f;
+        gateHoldSamples = (int) std::lround (t * (double) sr);
+        gateHoldSamples = juce::jmax (0, gateHoldSamples);
+        gateHoldRemaining = juce::jmin (gateHoldRemaining, gateHoldSamples);
     }
 
     void setMeasurementWindowMs (float ms)
@@ -389,39 +410,200 @@ public:
         returnAlpha = alphaFromMsSample (ms);
     }
 
-    void setMeasureHighpassHz (float hz)
-    {
-        const float fc = juce::jlimit (5.0f, 1000.0f, hz);
-        hpA = std::exp (-2.0f * juce::MathConstants<float>::pi * (fc / (float) sr));
-    }
-
 private:
+    //==============================================================================
+    // Util: alpha para 1-pole EMA por muestra
     inline float alphaFromMsSample (float ms) const noexcept
     {
         const float tau = juce::jmax (1.0e-4f, ms * 0.001f);
         return std::exp (-1.0f / (tau * (float) sr));
     }
 
-    inline float measureHP (float x, int ch, float* x1, float* y1) noexcept
+    //==============================================================================
+    // K-Weighting filter (2 biquads) con mapeo de coef desde SR=48k -> SR actual
+    struct KWeightingFilter
     {
-        const float y = hpA * (y1[ch] + x - x1[ch]);
-        x1[ch] = x;
-        y1[ch] = y;
-        return y;
-    }
+        struct Coeff
+        {
+            double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+            double a1 = 0.0, a2 = 0.0; // denom: 1 + a1 z^-1 + a2 z^-2
+        };
 
+        struct Biquad2ch
+        {
+            void set (const Coeff& c)
+            {
+                b0 = (float) c.b0; b1 = (float) c.b1; b2 = (float) c.b2;
+                a1 = (float) c.a1; a2 = (float) c.a2;
+            }
+
+            void reset()
+            {
+                x1[0]=x1[1]=0.0f; x2[0]=x2[1]=0.0f;
+                y1[0]=y1[1]=0.0f; y2[0]=y2[1]=0.0f;
+            }
+
+            inline float process (float x, int ch) noexcept
+            {
+                // DF1:
+                // y = b0 x + b1 x1 + b2 x2 - a1 y1 - a2 y2
+                const float y = (b0 * x) + (b1 * x1[ch]) + (b2 * x2[ch])
+                              - (a1 * y1[ch]) - (a2 * y2[ch]);
+
+                x2[ch] = x1[ch];
+                x1[ch] = x;
+                y2[ch] = y1[ch];
+                y1[ch] = y;
+                return y;
+            }
+
+            float b0=1.0f,b1=0.0f,b2=0.0f,a1=0.0f,a2=0.0f;
+            float x1[2]{}, x2[2]{}, y1[2]{}, y2[2]{};
+        };
+
+        void prepare (double sampleRate)
+        {
+            fs = (sampleRate > 1000.0 ? sampleRate : 48000.0);
+
+            // Coef base ITU a 48k (lo que pediste)
+            // Stage 1 (shelf)
+            const Coeff shelf48 {
+                1.53512485958697, -2.69169618940638, 1.19839281085285,
+               -1.69065929318241,  0.73248077421585
+            };
+
+            // Stage 2 (HP)
+            const Coeff hp48 {
+                1.0, -2.0, 1.0,
+               -1.99004745483398, 0.99007225036621
+            };
+
+            Coeff shelfSR{}, hpSR{};
+            mapFrom48kToFs (shelf48, fs, shelfSR);
+            mapFrom48kToFs (hp48,    fs, hpSR);
+
+            shelf.set (shelfSR);
+            hp.set (hpSR);
+
+            reset();
+        }
+
+        void reset()
+        {
+            shelf.reset();
+            hp.reset();
+        }
+
+        inline float process (float x, int ch) noexcept
+        {
+            x = shelf.process (x, ch);
+            x = hp.process (x, ch);
+            return x;
+        }
+
+    private:
+        static constexpr double fs0 = 48000.0;
+
+        static inline std::array<std::complex<double>, 2> quadRoots (double A, double B, double C)
+        {
+            // A z^2 + B z + C = 0
+            const std::complex<double> disc = std::sqrt (std::complex<double> (B*B - 4.0*A*C, 0.0));
+            const std::complex<double> twoA = 2.0 * A;
+            return { (-B + disc) / twoA, (-B - disc) / twoA };
+        }
+
+        static inline std::complex<double> evalH (const Coeff& c, double w)
+        {
+            // z = e^{jw}, z^{-1} = e^{-jw}
+            const std::complex<double> zinv = std::exp (std::complex<double> (0.0, -w));
+            const std::complex<double> zinv2 = zinv * zinv;
+
+            const std::complex<double> num = c.b0 + c.b1 * zinv + c.b2 * zinv2;
+            const std::complex<double> den = 1.0 + c.a1 * zinv + c.a2 * zinv2;
+
+            return num / den;
+        }
+
+        static inline std::complex<double> invBilinear (std::complex<double> z, double fs)
+        {
+            // s = 2fs * (z - 1)/(z + 1)
+            const std::complex<double> one (1.0, 0.0);
+            return (2.0 * fs) * (z - one) / (z + one);
+        }
+
+        static inline std::complex<double> fwdBilinear (std::complex<double> s, double fs)
+        {
+            // z = (1 + s/(2fs)) / (1 - s/(2fs))
+            const std::complex<double> one (1.0, 0.0);
+            const std::complex<double> k = s / (2.0 * fs);
+            return (one + k) / (one - k);
+        }
+
+        static inline void mapFrom48kToFs (const Coeff& c48, double fsNew, Coeff& out)
+        {
+            // 1) zeros/poles digitales @48k
+            const auto zZeros48 = quadRoots (c48.b0, c48.b1, c48.b2);
+            const auto zPoles48 = quadRoots (1.0,    c48.a1, c48.a2);
+
+            // 2) map to analog s via inverse bilinear (fs0)
+            const std::complex<double> sZ0 = invBilinear (zZeros48[0], fs0);
+            const std::complex<double> sZ1 = invBilinear (zZeros48[1], fs0);
+            const std::complex<double> sP0 = invBilinear (zPoles48[0], fs0);
+            const std::complex<double> sP1 = invBilinear (zPoles48[1], fs0);
+
+            // 3) map back to digital z via bilinear (fsNew)
+            const std::complex<double> zZ0 = fwdBilinear (sZ0, fsNew);
+            const std::complex<double> zZ1 = fwdBilinear (sZ1, fsNew);
+            const std::complex<double> zP0 = fwdBilinear (sP0, fsNew);
+            const std::complex<double> zP1 = fwdBilinear (sP1, fsNew);
+
+            // 4) construir denom real: 1 + a1 z^-1 + a2 z^-2
+            const std::complex<double> sumP = zP0 + zP1;
+            const std::complex<double> prodP = zP0 * zP1;
+
+            out.a1 = -(sumP.real());
+            out.a2 =  (prodP.real());
+
+            // 5) construir num (sin ganancia aún)
+            const std::complex<double> sumZ = zZ0 + zZ1;
+            const std::complex<double> prodZ = zZ0 * zZ1;
+
+            out.b0 = 1.0;
+            out.b1 = -(sumZ.real());
+            out.b2 =  (prodZ.real());
+
+            // 6) ajustar ganancia para match con la respuesta original (referencia)
+            // usamos 1kHz, pero si SR es muy baja, bajamos la referencia.
+            double fRef = 1000.0;
+            const double nyqNew = 0.5 * fsNew;
+            if (fRef > 0.35 * nyqNew)
+                fRef = 0.25 * fsNew; // bien debajo de Nyquist
+
+            const double w0 = 2.0 * juce::MathConstants<double>::pi * (fRef / fs0);
+            const double w1 = 2.0 * juce::MathConstants<double>::pi * (fRef / fsNew);
+
+            const double mag48  = std::abs (evalH (c48, w0));
+            const double magTmp = std::abs (evalH (out, w1));
+
+            const double k = (magTmp > 1.0e-18 ? (mag48 / magTmp) : 1.0);
+
+            out.b0 *= k;
+            out.b1 *= k;
+            out.b2 *= k;
+        }
+
+        double fs = 48000.0;
+        Biquad2ch shelf;
+        Biquad2ch hp;
+    };
+
+    //==============================================================================
     double sr = 48000.0;
 
     float minGain = juce::Decibels::decibelsToGain (-60.0f);
     float maxGain = juce::Decibels::decibelsToGain (+24.0f);
 
-    float gatePow = juce::Decibels::decibelsToGain (-80.0f) * juce::Decibels::decibelsToGain (-80.0f);
-
-    float hpA = 0.98f;
-    float in_hp_x1[2]  = { 0.0f, 0.0f };
-    float in_hp_y1[2]  = { 0.0f, 0.0f };
-    float out_hp_x1[2] = { 0.0f, 0.0f };
-    float out_hp_y1[2] = { 0.0f, 0.0f };
+    float gatePow = juce::Decibels::decibelsToGain (-70.0f) * juce::Decibels::decibelsToGain (-70.0f);
 
     float measAlpha = 0.999f;
     float inEnv  = 0.0f;
@@ -433,6 +615,12 @@ private:
 
     float compGain   = 1.0f;
     float targetGain = 1.0f;
+
+    int gateHoldSamples    = 0;
+    int gateHoldRemaining  = 0;
+
+    KWeightingFilter inK;
+    KWeightingFilter outK;
 };
 
 
@@ -685,14 +873,14 @@ struct LabeledKnob : juce::Component
         auto top = r.removeFromTop (topH);
 
         if (hasImg)
-            imageComp.setBounds (top);              // <-- NO lo reduzco: no lo agranda ni lo deforma
+            imageComp.setBounds (top);              // <-- NO lo reduzco
         else
             label.setBounds (top);
 
         // 2) Gap mínimo (PEGADO al knob)
-        r.removeFromTop (1);                        // <-- casi pegado
+        r.removeFromTop (1);
 
-        // 3) Mantén tu "baseline" anterior para el knob (esto es clave)
+        // 3) Mantén tu "baseline" anterior para el knob
         auto knobBase = r.reduced (16, 14);
 
         // 4) ...y recién ahí lo hacemos 25% más chico (0.75x)
@@ -711,6 +899,3 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
-
-
-
