@@ -393,7 +393,7 @@ struct Preset_Neve1073
 
         // Knob smoothing (25–40 ms) + audio taper/curvas
         {
-            const Real aK = alphaFromMsT ((Real) 35.0, sr);
+            const Real aK = alphaFromMsT ((Real) 12.0, sr);
             s.tone1_sm = onePoleLPT (s.tone1_sm, (Real) k.tone1_01, aK);
             s.tone2_sm = onePoleLPT (s.tone2_sm, (Real) k.tone2_01, aK);
         }
@@ -401,16 +401,31 @@ struct Preset_Neve1073
         const Real tone1 = clampT (s.tone1_sm, (Real) 0.0, (Real) 1.0);
         const Real tone2 = clampT (s.tone2_sm, (Real) 0.0, (Real) 1.0);
 
-        const Real t1 = smoothstep01 (tone1);
-        const Real t2 = smoothstep01 (tone2);
+        // Macro shaper: 0..1 -> 0..1 (más “empuje” hacia extremos)
+        auto shapeMacro = [&](Real v, Real kShape) noexcept -> Real
+        {
+            v = clampT (v, (Real) 0.0, (Real) 1.0);
+            const Real x = (v - (Real) 0.5) * (Real) 2.0; // -1..1
+            const Real denom = std::tanh (kShape);
+            const Real y = (std::fabs (denom) > (Real) 1.0e-18) ? (std::tanh (kShape * x) / denom) : x;
+            return (Real) 0.5 + (Real) 0.5 * y;
+        };
 
-        // Tone1: izq agresivo, der suavecito
-        const Real relax01 = pow01 (t1, (Real) 1.6);
-        const Real agg01   = pow01 ((Real) 1.0 - t1, (Real) 1.35);
+        const Real t1m = shapeMacro (tone1, (Real) 3.5);
+        const Real t2m = shapeMacro (tone2, (Real) 3.5);
 
-        // Tone2: izq dark, der bright
-        const Real bright01 = pow01 (t2, (Real) 1.35);
-        const Real dark01   = pow01 ((Real) 1.0 - t2, (Real) 1.35);
+        // Tone1: izq agresivo, der suavecito (más sensible)
+        const Real relax01 = pow01 (t1m, (Real) 0.85);
+        const Real agg01   = pow01 ((Real) 1.0 - t1m, (Real) 0.85);
+
+        // Tone2: izq dark, der bright (más sensible)
+        const Real bright01 = pow01 (t2m, (Real) 0.80);
+        const Real dark01   = pow01 ((Real) 1.0 - t2m, (Real) 0.80);
+
+        // Intensidad macro: centro suave, extremos “salvajes”
+        const Real t1Dist = std::fabs (tone1 - (Real) 0.5) * (Real) 2.0; // 0..1
+        const Real t2Dist = std::fabs (tone2 - (Real) 0.5) * (Real) 2.0; // 0..1
+        const Real macroI = (Real) 1.0 + (Real) 2.0 * pow01 ((t1Dist + t2Dist) * (Real) 0.5, (Real) 1.2);
 
         // ---- Independent trims ----
         const Real trimFc    = (Real) (1.0f + 0.015f * s.trimA);
@@ -755,21 +770,25 @@ struct Preset_Neve1073
 
             const Real relax2 = relax * relax;
 
-            Real diffMix = (Real) 0.00 + (Real) 0.52 * relax2;
-            diffMix = clampT (diffMix, (Real) 0.0, (Real) 0.55);
+            Real diffMix = (Real) 0.00 + (Real) 0.90 * relax2;
+            diffMix = clampT (diffMix, (Real) 0.0, (Real) 0.85);
 
-            Real fb = (Real) 0.00 + (Real) 0.18 * relax2;
-            fb *= (Real) (0.80 + 0.35 * dark);
-            fb = clampT (fb, (Real) 0.0, (Real) 0.22);
+            Real fb = (Real) 0.00 + (Real) 0.34 * relax2;
+            fb *= (Real) (0.75 + 0.55 * dark);
+            fb = clampT (fb, (Real) 0.0, (Real) 0.32);
 
-            Real dampFc = (Real) 6500.0 + (Real) 14000.0 * bright;
+            // Macro intensidad (centro suave, extremos fuertes)
+            diffMix = clampT (diffMix * macroI, (Real) 0.0, (Real) 0.90);
+            fb      = clampT (fb      * macroI, (Real) 0.0, (Real) 0.34);
+
+            Real dampFc = (Real) 4500.0 + (Real) 22000.0 * bright;
             dampFc *= ((Real) 1.00 - (Real) 0.18 * env01);
             dampFc = clampT (dampFc, (Real) 3000.0, (Real) (0.45 * sr));
             const Real aDamp = alphaFromHzT (dampFc, sr);
 
             const Real smearMul =
-                ((Real) 1.20 - (Real) 0.55 * relax) *
-                ((Real) 0.90 + (Real) 0.35 * bright);
+                ((Real) 1.55 - (Real) 1.05 * relax) *
+                ((Real) 0.85 + (Real) 0.75 * bright);
 
             Real fcList[State::kDiffN] = {
                 (Real) 250.0, (Real) 520.0, (Real) 930.0,
@@ -908,7 +927,7 @@ struct Preset_Neve1073
 
         // 2) Air shelf más auténtico: RBJ high-shelf con slope suave + smoothing gain
         {
-            const Real airDbTarget = ((Real) -0.8 * dark01) + ((Real) 1.8 * bright01);
+            const Real airDbTarget = ((Real) -3.0 * dark01) + ((Real) 6.0 * bright01);
 
             const Real aG = alphaFromMsT((Real) 35.0, sr);
             s.airGain_sm = onePoleLPT(s.airGain_sm, airDbTarget, aG);
