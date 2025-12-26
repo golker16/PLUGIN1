@@ -140,151 +140,6 @@ void YourPluginAudioProcessor::setStateInformation (const void* data, int sizeIn
 }
 
 //==============================================================================
-// Tilt (legacy setter directo)
-void YourPluginAudioProcessor::updateTiltCoeffs (float tone2_01)
-{
-    const float t = juce::jlimit (0.0f, 1.0f, tone2_01);
-    const float tiltDb = plugin::mapToneTiltDb (t);
-
-    const float mag01 = juce::jlimit (0.0f, 1.0f, std::abs (tiltDb) / 9.0f);
-
-    const float fcLowBase  = 240.0f;
-    const float fcHighBase = 3200.0f;
-
-    float fcLow  = fcLowBase;
-    float fcHigh = fcHighBase;
-
-    if (tiltDb < 0.0f) // dark
-    {
-        fcHigh = fcHighBase * (1.0f - 0.35f * mag01);
-        fcLow  = fcLowBase  * (1.0f + 0.20f * mag01);
-    }
-    else if (tiltDb > 0.0f) // bright
-    {
-        fcHigh = fcHighBase * (1.0f + 0.55f * mag01);
-        fcLow  = fcLowBase  * (1.0f - 0.15f * mag01);
-    }
-
-    fcLow  = juce::jlimit (90.0f,   650.0f,  fcLow);
-    fcHigh = juce::jlimit (1200.0f, 8000.0f, fcHigh);
-
-    constexpr float q = 0.707f;
-    auto low  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (
-        sr, fcLow, q, juce::Decibels::decibelsToGain (-tiltDb));
-    auto high = juce::dsp::IIR::Coefficients<float>::makeHighShelf (
-        sr, fcHigh, q, juce::Decibels::decibelsToGain ( tiltDb));
-
-    *lowShelfL.coefficients  = *low;
-    *lowShelfR.coefficients  = *low;
-    *highShelfL.coefficients = *high;
-    *highShelfR.coefficients = *high;
-}
-
-//==============================================================================
-// ✅ Tone sin clicks: helpers rampa/interpolación de coeficientes
-
-void YourPluginAudioProcessor::calcTiltCoeffArrays (float tone2_01,
-                                                    std::array<float, 6>& low,
-                                                    std::array<float, 6>& high)
-{
-    const float t = juce::jlimit (0.0f, 1.0f, tone2_01);
-    const float tiltDb = plugin::mapToneTiltDb (t);
-
-    const float mag01 = juce::jlimit (0.0f, 1.0f, std::abs (tiltDb) / 9.0f);
-
-    const float fcLowBase  = 240.0f;
-    const float fcHighBase = 3200.0f;
-
-    float fcLow  = fcLowBase;
-    float fcHigh = fcHighBase;
-
-    if (tiltDb < 0.0f) // dark
-    {
-        fcHigh = fcHighBase * (1.0f - 0.35f * mag01);
-        fcLow  = fcLowBase  * (1.0f + 0.20f * mag01);
-    }
-    else if (tiltDb > 0.0f) // bright
-    {
-        fcHigh = fcHighBase * (1.0f + 0.55f * mag01);
-        fcLow  = fcLowBase  * (1.0f - 0.15f * mag01);
-    }
-
-    fcLow  = juce::jlimit (90.0f,   650.0f,  fcLow);
-    fcHigh = juce::jlimit (1200.0f, 8000.0f, fcHigh);
-
-    constexpr float q = 0.707f;
-
-    auto lowC  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (
-        sr, fcLow, q, juce::Decibels::decibelsToGain (-tiltDb));
-
-    auto highC = juce::dsp::IIR::Coefficients<float>::makeHighShelf (
-        sr, fcHigh, q, juce::Decibels::decibelsToGain ( tiltDb));
-
-    for (int i = 0; i < 6; ++i)
-    {
-        low [(size_t) i] = lowC ->coefficients[(size_t) i];
-        high[(size_t) i] = highC->coefficients[(size_t) i];
-    }
-}
-
-void YourPluginAudioProcessor::beginTiltRamp (float tone2_01, int rampSamples)
-{
-    const int N = juce::jmax (1, rampSamples);
-
-    calcTiltCoeffArrays (tone2_01, tiltLowTgt, tiltHighTgt);
-
-    for (int i = 0; i < 6; ++i)
-    {
-        tiltLowStep [(size_t) i]  = (tiltLowTgt [(size_t) i]  - tiltLowCur [(size_t) i])  / (float) N;
-        tiltHighStep[(size_t) i]  = (tiltHighTgt[(size_t) i]  - tiltHighCur[(size_t) i])  / (float) N;
-    }
-
-    tiltRampRemaining = N;
-}
-
-inline void YourPluginAudioProcessor::tickTiltRamp() noexcept
-{
-    if (tiltRampRemaining <= 0)
-        return;
-
-    for (int i = 0; i < 6; ++i)
-    {
-        tiltLowCur [(size_t) i]  += tiltLowStep [(size_t) i];
-        tiltHighCur[(size_t) i]  += tiltHighStep[(size_t) i];
-    }
-
-    --tiltRampRemaining;
-
-    if (tiltRampRemaining == 0)
-    {
-        // “snap” final para evitar drift por floating error
-        tiltLowCur  = tiltLowTgt;
-        tiltHighCur = tiltHighTgt;
-    }
-
-    // ✅ FIX C2106: NO escribir por índice. Construir Coefficients y asignar completo.
-    if (lowShelfL.coefficients != nullptr)
-        *lowShelfL.coefficients = juce::dsp::IIR::Coefficients<float> (
-            tiltLowCur[0], tiltLowCur[1], tiltLowCur[2],
-            tiltLowCur[3], tiltLowCur[4], tiltLowCur[5]);
-
-    if (lowShelfR.coefficients != nullptr)
-        *lowShelfR.coefficients = juce::dsp::IIR::Coefficients<float> (
-            tiltLowCur[0], tiltLowCur[1], tiltLowCur[2],
-            tiltLowCur[3], tiltLowCur[4], tiltLowCur[5]);
-
-    if (highShelfL.coefficients != nullptr)
-        *highShelfL.coefficients = juce::dsp::IIR::Coefficients<float> (
-            tiltHighCur[0], tiltHighCur[1], tiltHighCur[2],
-            tiltHighCur[3], tiltHighCur[4], tiltHighCur[5]);
-
-    if (highShelfR.coefficients != nullptr)
-        *highShelfR.coefficients = juce::dsp::IIR::Coefficients<float> (
-            tiltHighCur[0], tiltHighCur[1], tiltHighCur[2],
-            tiltHighCur[3], tiltHighCur[4], tiltHighCur[5]);
-}
-
-//==============================================================================
 // Prepare
 
 int YourPluginAudioProcessor::getDesiredOversamplingIndex() const noexcept
@@ -368,13 +223,11 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
 {
     sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-    // ✅ CAMBIO: smoothers ahora son Tone 1 / Tone 2
+    // ✅ smoothers: Tone1 + Mix (Tone2 ya NO se suaviza aquí porque el tilt legacy fue eliminado)
     tone1Sm.reset (sr, 0.02);
-    tone2Sm.reset (sr, 0.02);
     mixSm  .reset (sr, 0.02);
 
     tone1Sm.setCurrentAndTargetValue (pTone1 ? pTone1->load() : 0.5f);
-    tone2Sm.setCurrentAndTargetValue (pTone2 ? pTone2->load() : 0.5f);
     mixSm  .setCurrentAndTargetValue (pMix   ? pMix  ->load() : 1.0f);
 
     // ✅ NUEVO: Output gain + blend autogain
@@ -384,30 +237,6 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     autoGainBlendSm.reset (sr, 0.01);
     const bool agOn = (pAutoGain != nullptr && pAutoGain->load() >= 0.5f);
     autoGainBlendSm.setCurrentAndTargetValue (agOn ? 1.0f : 0.0f);
-
-    lowShelfL.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
-    lowShelfR.coefficients  = juce::dsp::IIR::Coefficients<float>::makeLowShelf  (sr, 180.0f, 0.707f, 1.0f);
-    highShelfL.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
-    highShelfR.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, 3800.0f, 0.707f, 1.0f);
-
-    // Legacy tilt: usa Tone 2 (dark/bright)
-    updateTiltCoeffs (pTone2 ? pTone2->load() : 0.5f);
-
-    // ✅ Inicializar arrays de coef para ramp
-    auto read6 = [] (const juce::dsp::IIR::Coefficients<float>& c, std::array<float, 6>& dst)
-    {
-        for (int i = 0; i < 6; ++i)
-            dst[(size_t) i] = c.coefficients[(size_t) i];
-    };
-
-    if (lowShelfL.coefficients != nullptr)  read6 (*lowShelfL.coefficients,  tiltLowCur);
-    if (highShelfL.coefficients != nullptr) read6 (*highShelfL.coefficients, tiltHighCur);
-
-    tiltLowTgt = tiltLowCur;
-    tiltHighTgt = tiltHighCur;
-    tiltLowStep.fill (0.0f);
-    tiltHighStep.fill (0.0f);
-    tiltRampRemaining = 0;
 
     autoGain.prepare (sr);
 
@@ -852,7 +681,6 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     // targets de smoothers
     tone1Sm.setTargetValue (pTone1 ? pTone1->load() : 0.5f);
-    tone2Sm.setTargetValue (pTone2 ? pTone2->load() : 0.5f);
     mixSm  .setTargetValue (pMix   ? pMix  ->load() : 1.0f);
 
     // ✅ AutoGain ON/OFF + Output targets
@@ -885,53 +713,18 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     }
 
     // -------------------------------------------------------------------------
-    // 0) Tone smoothing + tilt SIN clicks (rampa por coef, stride=32)
+    // 0) Construir wetBuffer (pre-wet) sin tilt legacy (Tone 2 vive en el preset)
     if (wetBuffer.getNumChannels() != wetCh || wetBuffer.getNumSamples() < numSamples)
         wetBuffer.setSize (wetCh, numSamples, false, false, true);
 
     auto* wetL = wetBuffer.getWritePointer (0);
     auto* wetR = (wetCh > 1) ? wetBuffer.getWritePointer (1) : nullptr;
 
-    int strideLeft = 0;
-
     for (int i = 0; i < numSamples; ++i)
     {
-        // Tone 2 (dark/bright) — legacy tilt ramp (aunque los filtros están comentados abajo)
-        const float tone2Val = tone2Sm.getNextValue();
-
-        if (strideLeft <= 0)
-        {
-            const int rampN = juce::jmin (kTiltUpdateStride, numSamples - i);
-            beginTiltRamp (tone2Val, rampN);
-            strideLeft = kTiltUpdateStride;
-        }
-
-        tickTiltRamp();
-        --strideLeft;
-
-        // ✅ IMPORTANTE: avanzar tone1Sm para mantener el smoother “vivo” (aunque no lo usemos aquí)
-        (void) tone1Sm.getNextValue();
-
-        // ✅ CAMBIO: NO HAY pregain por “Drive”. Tone 1 ya NO es Drive.
-        const float pregain = 1.0f;
-        float xL = ch0[i] * pregain;
-
-        // ✅ (B): quitar TONE como “filtro encima”
-        // xL = lowShelfL.processSample (xL);
-        // xL = highShelfL.processSample (xL);
-
-        wetL[i] = xL;
-
+        wetL[i] = ch0[i];
         if (wetR != nullptr && ch1 != nullptr)
-        {
-            float xR = ch1[i] * pregain;
-
-            // ✅ (B): quitar TONE como “filtro encima”
-            // xR = lowShelfR.processSample (xR);
-            // xR = highShelfR.processSample (xR);
-
-            wetR[i] = xR;
-        }
+            wetR[i] = ch1[i];
     }
 
     // -------------------------------------------------------------------------
@@ -1264,4 +1057,5 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
 
