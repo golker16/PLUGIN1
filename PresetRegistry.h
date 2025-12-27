@@ -20,6 +20,7 @@
 
 // Presets disponibles
 #include "preset-Neve1073.h"
+#include "preset-API312512.h"
 
 struct PresetRegistry
 {
@@ -98,5 +99,7 @@ struct PresetRegistry
     // Lista de presets disponibles
     static inline const std::array<Item, 1> items {{
         make<Preset_Neve1073>(),
+        make<Preset_API312512>(),
     }};
 };
+
