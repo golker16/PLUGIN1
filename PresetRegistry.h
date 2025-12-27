@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <new> // <-- A) placement-new
 
 // IMPORTANT: usa los nombres reales de tus headers:
 #include "preset-Neve1073.h"
@@ -44,6 +45,10 @@ namespace preset_registry_detail
     using ResetFn   = void (*)(void*) noexcept;
     using ProcessFn = float (*)(void*, float, const plugin::Knobs&) noexcept;
 
+    // B) construct/destruct
+    using ConstructFn = void (*)(void*) noexcept;
+    using DestructFn  = void (*)(void*) noexcept;
+
     struct PresetDesc
     {
         const char* displayName  = "";
@@ -52,6 +57,10 @@ namespace preset_registry_detail
         PrepareFn prepare = nullptr;
         ResetFn   reset   = nullptr;
         ProcessFn process = nullptr;
+
+        // C) construct/destruct en el descriptor
+        ConstructFn construct = nullptr;
+        DestructFn  destruct  = nullptr;
 
         std::size_t stateSize  = 0;
         std::size_t stateAlign = 0;
@@ -78,17 +87,34 @@ namespace preset_registry_detail
         return PresetT::process(st, x, k);
     }
 
+    // D) thunks para ciclo de vida del State (placement-new / destructor)
+    template <typename PresetT>
+    static void constructThunk(void* mem) noexcept
+    {
+        ::new (mem) typename PresetT::State();
+    }
+
+    template <typename PresetT>
+    static void destructThunk(void* mem) noexcept
+    {
+        auto* st = reinterpret_cast<typename PresetT::State*>(mem);
+        st->~State();
+    }
+
     constexpr std::size_t maxSz(std::size_t a, std::size_t b) noexcept { return (a > b) ? a : b; }
 
     template <typename PresetT>
     constexpr PresetDesc make() noexcept
     {
+        // E) Rellenar construct/destruct en el descriptor
         return PresetDesc{
             PresetT::kDisplayName,
             knobBehavior<PresetT>(),
             &prepareThunk<PresetT>,
             &resetThunk<PresetT>,
             &processThunk<PresetT>,
+            &constructThunk<PresetT>,
+            &destructThunk<PresetT>,
             sizeof(typename PresetT::State),
             alignof(typename PresetT::State)
         };
