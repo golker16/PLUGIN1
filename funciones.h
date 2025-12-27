@@ -276,12 +276,13 @@ private:
 };
 
 //==============================================================================
-// AutoGainExact (v4 MASTERING): K-weighting + ventana momentary (~400ms) + gate con hold
+// AutoGainExact (v5 “A/B RIGUROSO”): K-weighting + RAW power + SIN GATE
 //
-// - K-weighting real (2 biquads): shelf + HP (coef base ITU a 48k)
-// - Recalcula coef para cualquier SR via mapeo z/p -> s (inverse bilinear @48k) -> z (bilinear @SR)
-// - Ventana tipo momentary: EMA con tau=400ms (IIR cercano)
-// - Gate loudness style -70 dB + HOLD 150 ms para evitar “respirar” en pausas
+// Cambios:
+// - Elimina gate/hold (en silencio ratio->1 con epsilon).
+// - Más rápido: ventana 80ms, smoothing 6/80ms.
+// - Clamp ampliado: ±36 dB.
+// - Medición más robusta: promedio de power RAW y K-weighted.
 class AutoGainExact
 {
 public:
@@ -289,18 +290,15 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-        // defaults “match rápido” (más agresivo que el perfil mastering)
-        // Objetivo: que al mover Drive/Preamp el match se note al toque.
-        setClampDb (-24.0f, +24.0f);
-        setGateDb  (-90.0f);              // gate muy bajo: casi siempre mide
-        setGateHoldMs (80.0f);            // hold corto
-        setMeasurementWindowMs (120.0f);  // ventana más rápida que 400ms
+        // defaults “match rápido” (agresivo a propósito)
+        // Objetivo: que al mover Drive/Preamp el match se note AL TOQUE.
+        setClampDb (-36.0f, +36.0f);
 
-        // smoothing más reactivo
-        setGainSmoothingMs (12.0f, 120.0f);
-        setReturnToUnityMs (450.0f);
+        // ✅ sin gate: en silencio el ratio tiende a 1 por el epsilon (no “respira”)
+        setMeasurementWindowMs (80.0f);    // ventana rápida
+        setGainSmoothingMs (6.0f, 80.0f);  // ataque/relax rápidos
+        setReturnToUnityMs (250.0f);
 
-        // preparar K-weighting (coef dependientes de SR)
         inK.prepare (sr);
         outK.prepare (sr);
 
@@ -315,8 +313,6 @@ public:
         compGain   = 1.0f;
         targetGain = 1.0f;
 
-        gateHoldRemaining = 0;
-
         inK.reset();
         outK.reset();
     }
@@ -325,48 +321,40 @@ public:
 
     inline float processStereo (float dryL, float dryR, float outLpre, float outRpre) noexcept
     {
-        // 1) K-weighting aplicado a DRY y a OUT (pre makeup)
         const float inL  = inK.process (dryL,     0);
         const float inR  = inK.process (dryR,     1);
         const float outL = outK.process (outLpre, 0);
         const float outR = outK.process (outRpre, 1);
 
-        // 2) energía (power) y ventana momentary (EMA)
-        const float pIn  = 0.5f * (inL  * inL  + inR  * inR);
-        const float pOut = 0.5f * (outL * outL + outR * outR);
+        // 2) energía (power) + ventana momentary (EMA)
+        //    ✅ “riguroso” para A/B: medimos power RAW y también K-weighted y promediamos.
+        const float pInK   = 0.5f * (inL  * inL  + inR  * inR);
+        const float pOutK  = 0.5f * (outL * outL + outR * outR);
+
+        const float pInRaw  = 0.5f * (dryL    * dryL    + dryR    * dryR);
+        const float pOutRaw = 0.5f * (outLpre * outLpre + outRpre * outRpre);
+
+        const float pIn  = 0.5f * (pInK  + pInRaw);
+        const float pOut = 0.5f * (pOutK + pOutRaw);
 
         inEnv  = measAlpha * inEnv  + (1.0f - measAlpha) * pIn;
         outEnv = measAlpha * outEnv + (1.0f - measAlpha) * pOut;
 
-        const bool gateOk = (inEnv > gatePow) && (outEnv > gatePow);
+        // ✅ sin gate: ratio con epsilon (en silencio => ratio ~ 1)
+        constexpr float eps = 1.0e-12f;
 
-        if (gateOk)
+        if ((inEnv + outEnv) < 1.0e-10f)
         {
-            // refresca hold
-            gateHoldRemaining = gateHoldSamples;
-
-            // objetivo = sqrt(in/out)
-            const float ratio = inEnv / (outEnv + 1.0e-20f);
+            targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
+        }
+        else
+        {
+            const float ratio = (inEnv + eps) / (outEnv + eps);
             float g = std::sqrt (ratio);
             g = juce::jlimit (minGain, maxGain, g);
             targetGain = g;
         }
-        else
-        {
-            // hold: no “respires” con silencios/pausas cortas
-            if (gateHoldRemaining > 0)
-            {
-                --gateHoldRemaining;
-                // targetGain se mantiene (no vuelve a unity todavía)
-            }
-            else
-            {
-                // return to unity suave
-                targetGain = returnAlpha * targetGain + (1.0f - returnAlpha) * 1.0f;
-            }
-        }
 
-        // smoothing attack/release
         const bool needDown = (targetGain < compGain);
         const float a = needDown ? gainAttackAlpha : gainReleaseAlpha;
         compGain = a * compGain + (1.0f - a) * targetGain;
@@ -381,19 +369,9 @@ public:
         maxGain = juce::Decibels::decibelsToGain (maxDb);
     }
 
-    void setGateDb (float gateDb)
-    {
-        const float gateLin = juce::Decibels::decibelsToGain (gateDb);
-        gatePow = gateLin * gateLin;
-    }
-
-    void setGateHoldMs (float ms)
-    {
-        const float t = juce::jmax (0.0f, ms) * 0.001f;
-        gateHoldSamples = (int) std::lround (t * (double) sr);
-        gateHoldSamples = juce::jmax (0, gateHoldSamples);
-        gateHoldRemaining = juce::jmin (gateHoldRemaining, gateHoldSamples);
-    }
+    // ✅ compat (ya no se usa): mantenido para no romper builds viejos si alguien lo llama.
+    void setGateDb (float) {}
+    void setGateHoldMs (float) {}
 
     void setMeasurementWindowMs (float ms)
     {
@@ -602,10 +580,8 @@ private:
     //==============================================================================
     double sr = 48000.0;
 
-    float minGain = juce::Decibels::decibelsToGain (-60.0f);
-    float maxGain = juce::Decibels::decibelsToGain (+24.0f);
-
-    float gatePow = juce::Decibels::decibelsToGain (-70.0f) * juce::Decibels::decibelsToGain (-70.0f);
+    float minGain = juce::Decibels::decibelsToGain (-36.0f);
+    float maxGain = juce::Decibels::decibelsToGain (+36.0f);
 
     float measAlpha = 0.999f;
     float inEnv  = 0.0f;
@@ -617,9 +593,6 @@ private:
 
     float compGain   = 1.0f;
     float targetGain = 1.0f;
-
-    int gateHoldSamples    = 0;
-    int gateHoldRemaining  = 0;
 
     KWeightingFilter inK;
     KWeightingFilter outK;
