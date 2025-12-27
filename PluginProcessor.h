@@ -242,6 +242,9 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outputGainSm;      // ganancia lineal
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> autoGainBlendSm;   // 0..1 (crossfade ON/OFF)
 
+    // ✅ NUEVO: detectar cambios de estado para resetear AutoGain al activarlo
+    bool lastAutoGainOn = true;
+
     // Oversampling (seleccionable en runtime)
     static constexpr int kMaxOversamplingIndex = 3; // x8
     std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, 4> oversamplers; // [0]=nullptr, [1]=x2, [2]=x4, [3]=x8
