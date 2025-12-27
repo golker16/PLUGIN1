@@ -136,12 +136,13 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-        setMeasurementWindowMs (160.0f);
-        setGainSmoothingMs (8.0f, 120.0f);
+        setMeasurementWindowMs (60.0f);    // 60–90ms = MUY rápido (más jitter)
+        setGainSmoothingMs (5.0f, 60.0f);  // attack 3–8ms, release 40–90ms
+        setGateHoldMs (40.0f);             // hold corto
+        setReturnToUnityMs (250.0f);       // vuelve a unity más rápido
         setGateDb (-60.0f);
         setClampDb (-18.0f, +18.0f);
         setMeasureHighpassHz (120.0f);
-        setReturnToUnityMs (600.0f);
 
         reset();
     }
