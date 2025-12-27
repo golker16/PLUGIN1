@@ -288,15 +288,16 @@ public:
     void prepare (double sampleRate)
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
+        // defaults “match rápido” (más agresivo que el perfil mastering)
+        // Objetivo: que al mover Drive/Preamp el match se note al toque.
+        setClampDb (-24.0f, +24.0f);
+        setGateDb  (-90.0f);              // gate muy bajo: casi siempre mide
+        setGateHoldMs (80.0f);            // hold corto
+        setMeasurementWindowMs (120.0f);  // ventana más rápida que 400ms
 
-        // defaults “mastering”
-        setClampDb (-60.0f, +24.0f);
-        setGateDb  (-70.0f);               // ✅ (B) más estándar loudness gate
-        setGateHoldMs (150.0f);            // ✅ (B) hold para pausas/transientes
-        setMeasurementWindowMs (400.0f);   // ✅ (B) momentary ~400ms
-
-        setGainSmoothingMs (0.30f, 6.0f);
-        setReturnToUnityMs (220.0f);
+        // smoothing más reactivo
+        setGainSmoothingMs (12.0f, 120.0f);
+        setReturnToUnityMs (450.0f);
 
         // preparar K-weighting (coef dependientes de SR)
         inK.prepare (sr);
