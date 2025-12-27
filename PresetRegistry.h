@@ -1,105 +1,123 @@
 #pragma once
-
-// PresetRegistry.h (SOURCE VERSION)
-// ------------------------------------------------------------
-// Este archivo reemplaza la versión autogenerada por CMake.
-// Motivo: en algunos builds/IDEs el header generado no estaba
-// entrando en el include path, dejando PresetRegistry::items vacío
-// y el ComboBox sin presets.
-//
-// Si agregas nuevos presets, inclúyelos aquí y añádelos al array
-// 'items'.
-
-#include <array>
 #include <cstddef>
-#include <new>
+#include <cstdint>
 #include <type_traits>
 
-// (A) ✅ Para plugin::Knobs
-#include "funciones.h"
+#include "funciones.h" // para plugin::Knobs
 
-// Presets disponibles
-#include "preset-Neve1073.h"
+// === Incluye aquí tus presets ===
+#include "preset-Neve.h"
 #include "preset-API312512.h"
+// #include "preset-Otro.h" ...
 
-struct PresetRegistry
+// -----------------------------------------------------------------------------
+// Preset registry "vtable"
+// - Arregla C2078 (too many initializers) al incluir knobBehavior en el descriptor
+// - Permite presets con State propio (size/align) y process con knobs
+// -----------------------------------------------------------------------------
+struct PresetDesc
 {
-    struct Item
+    const char* displayName = "";
+    const char* knobBehavior = "";     // <-- ESTE es el campo que te faltaba
+
+    // Estado por instancia (cada canal / cada plugin instance)
+    std::size_t stateSize  = 0;
+    std::size_t stateAlign = alignof(std::max_align_t);
+
+    // Funciones tipo vtable (operan sobre void* state)
+    void  (*prepare)(void* state, float sampleRate) = nullptr;
+    void  (*reset)(void* state) = nullptr;
+    float (*process)(void* state, float x, const plugin::Knobs& k) = nullptr;
+};
+
+// Helpers para construir el PresetDesc desde un tipo PresetT
+namespace preset_registry_detail
+{
+    template <typename PresetT>
+    static void prepareThunk(void* st, float sr)
     {
-        const char* displayName  = nullptr;
-        const char* knobBehavior = nullptr;
+        auto* s = reinterpret_cast<typename PresetT::State*>(st);
+        PresetT::prepare(*s, sr);
+    }
 
-        std::size_t stateSize  = 1;
-        std::size_t stateAlign = alignof (std::max_align_t);
+    template <typename PresetT>
+    static void resetThunk(void* st)
+    {
+        auto* s = reinterpret_cast<typename PresetT::State*>(st);
+        PresetT::reset(*s);
+    }
 
-        // Lifecycle del State (para soportar State con inicializadores / miembros no POD)
-        void  (*construct)(void* state) = nullptr;
-        void  (*destruct) (void* state) = nullptr;
+    template <typename PresetT>
+    static float processThunk(void* st, float x, const plugin::Knobs& k)
+    {
+        auto* s = reinterpret_cast<typename PresetT::State*>(st);
+        return PresetT::process(*s, x, k);
+    }
 
-        void  (*prepare)(void* state, float sr) = nullptr;
-        void  (*reset)  (void* state) = nullptr;
-
-        // (B) ✅ Firma nueva: el preset recibe knobs
-        float (*process)(void* state, float x, const plugin::Knobs& k) = nullptr;
+    // Fallback si un preset no define kKnobBehavior
+    template <typename PresetT, typename = void>
+    struct KnobBehaviorGetter
+    {
+        static constexpr const char* get() { return ""; }
     };
 
-    template <typename Preset>
-    static Item make() noexcept
+    template <typename PresetT>
+    struct KnobBehaviorGetter<PresetT, std::void_t<decltype(PresetT::kKnobBehavior)>>
     {
-        // Nota: muchos States usan in-class initializers (no son *trivially* constructible).
-        // Por eso construimos/destruimos explícitamente con placement-new.
-        static_assert (std::is_nothrow_default_constructible_v<typename Preset::State>,
-                       "Preset::State must be nothrow default constructible");
-        static_assert (std::is_nothrow_destructible_v<typename Preset::State>,
-                       "Preset::State must be nothrow destructible");
+        static constexpr const char* get() { return PresetT::kKnobBehavior; }
+    };
 
-        return Item
-        {
-            // (C) ✅ registra texto de comportamiento por preset
-            Preset::kDisplayName,
-            Preset::kKnobBehavior,
-
-            sizeof (typename Preset::State),
-            alignof (typename Preset::State),
-
-            +[](void* st)
-            {
-                new (st) typename Preset::State();
-            },
-            +[](void* st)
-            {
-                // ✅ FIX: destruir el tipo correcto
-                reinterpret_cast<typename Preset::State*> (st)->~State();
-            },
-            +[](void* st, float sr)
-            {
-                auto& s = *reinterpret_cast<typename Preset::State*> (st);
-                Preset::prepare (s, sr);
-            },
-            +[](void* st)
-            {
-                auto& s = *reinterpret_cast<typename Preset::State*> (st);
-                Preset::reset (s);
-            },
-
-            // (C) ✅ ahora pasa knobs al preset
-            +[](void* st, float x, const plugin::Knobs& k) -> float
-            {
-                auto& s = *reinterpret_cast<typename Preset::State*> (st);
-                return Preset::process (s, x, k);
-            }
+    template <typename PresetT>
+    constexpr PresetDesc make() noexcept
+    {
+        return PresetDesc{
+            PresetT::kDisplayName,
+            KnobBehaviorGetter<PresetT>::get(),
+            sizeof(typename PresetT::State),
+            alignof(typename PresetT::State),
+            &prepareThunk<PresetT>,
+            &resetThunk<PresetT>,
+            &processThunk<PresetT>
         };
     }
 
-    // Máximos para reservar storage (stereo): si agregas presets con State
-    // más grande/alineación mayor, actualiza estos constexpr.
-    static constexpr std::size_t kMaxStateSize  = sizeof (Preset_Neve1073::State);
-    static constexpr std::size_t kMaxStateAlign = alignof (Preset_Neve1073::State);
+    // Max helpers (para reservar buffer de estado con tamaño/alineación suficiente)
+    constexpr std::size_t maxSz(std::size_t a, std::size_t b) { return a > b ? a : b; }
+    constexpr std::size_t maxAl(std::size_t a, std::size_t b) { return a > b ? a : b; }
+} // namespace preset_registry_detail
 
-    // Lista de presets disponibles
-    static inline const std::array<Item, 1> items {{
-        make<Preset_Neve1073>(),
-        make<Preset_API312512>(),
-    }};
+// -----------------------------------------------------------------------------
+// Lista de presets disponibles
+// Si agregas presets, solo añade preset_registry_detail::make<TuPreset>()
+// -----------------------------------------------------------------------------
+inline constexpr PresetDesc kPresets[] = {
+    preset_registry_detail::make<Preset_Neve>(),
+    preset_registry_detail::make<Preset_API312512>(),
+    // preset_registry_detail::make<Preset_Otro>(),
 };
+
+inline constexpr std::size_t kPresetCount = sizeof(kPresets) / sizeof(kPresets[0]);
+
+// -----------------------------------------------------------------------------
+// Cálculo de máximo tamaño/alineación de State para reservar un buffer único
+// -----------------------------------------------------------------------------
+inline constexpr std::size_t kMaxPresetStateSize =
+    []() constexpr {
+        std::size_t m = 0;
+        for (std::size_t i = 0; i < kPresetCount; ++i) m = preset_registry_detail::maxSz(m, kPresets[i].stateSize);
+        return m;
+    }();
+
+inline constexpr std::size_t kMaxPresetStateAlign =
+    []() constexpr {
+        std::size_t m = alignof(std::max_align_t);
+        for (std::size_t i = 0; i < kPresetCount; ++i) m = preset_registry_detail::maxAl(m, kPresets[i].stateAlign);
+        return m;
+    }();
+
+// Helper para acceder por índice (sin tirar)
+inline constexpr const PresetDesc& getPreset(std::size_t idx) noexcept
+{
+    return kPresets[(idx < kPresetCount) ? idx : 0];
+}
 
