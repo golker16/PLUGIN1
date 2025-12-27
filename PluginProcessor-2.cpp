@@ -238,6 +238,9 @@ void YourPluginAudioProcessor::prepareToPlay (double sampleRate, int samplesPerB
     const bool agOn = (pAutoGain != nullptr && pAutoGain->load() >= 0.5f);
     autoGainBlendSm.setCurrentAndTargetValue (agOn ? 1.0f : 0.0f);
 
+    // ✅ mantener coherencia del toggle detector
+    lastAutoGainOn = agOn;
+
     autoGain.prepare (sr);
 
     maxBlockSizePrepared = juce::jmax (1, samplesPerBlock);
@@ -685,7 +688,26 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     // ✅ AutoGain ON/OFF + Output targets
     const bool agOn = (pAutoGain != nullptr && pAutoGain->load() >= 0.5f);
-    autoGainBlendSm.setTargetValue (agOn ? 1.0f : 0.0f);
+
+    if (agOn != lastAutoGainOn)
+    {
+        if (agOn)
+        {
+            autoGain.reset();
+            autoGainBlendSm.setCurrentAndTargetValue (0.0f);  // entra desde 0
+            autoGainBlendSm.setTargetValue (1.0f);
+        }
+        else
+        {
+            autoGainBlendSm.setTargetValue (0.0f);            // vuelve a manual
+        }
+
+        lastAutoGainOn = agOn;
+    }
+    else
+    {
+        autoGainBlendSm.setTargetValue (agOn ? 1.0f : 0.0f);
+    }
 
     const float outDb = (pOutputDb != nullptr ? pOutputDb->load() : 0.0f);
     outputGainSm.setTargetValue (juce::Decibels::decibelsToGain (outDb));
@@ -957,8 +979,8 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     // -------------------------------------------------------------------------
     // 3) Mix + AUTO-LEVEL (por muestra) + Output manual cuando AutoGain OFF
-    const float safetyHeadroom = juce::Decibels::decibelsToGain (-0.9f);
-    const float maxAutoGain    = juce::Decibels::decibelsToGain (+12.0f);
+    // ✅ CAMBIO: sin headroom ni softclip. Solo clamp alto +36dB para evitar números locos.
+    const float maxAutoGain = juce::Decibels::decibelsToGain (+36.0f);
 
     auto* dL = dryDelayBuffer.getWritePointer (0);
     auto* dR = (dryDelayBuffer.getNumChannels() > 1) ? dryDelayBuffer.getWritePointer (1) : nullptr;
@@ -1001,20 +1023,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             if (useAuto)
             {
                 gAuto = autoGain.processStereo (dryL, dryR, dryL, dryR);
-                gAuto = juce::jlimit (0.0f, maxAutoGain, gAuto);
+                gAuto = juce::jmin (maxAutoGain, gAuto); // ✅ solo clamp alto
             }
 
             const float gFinal = blend * gAuto + (1.0f - blend) * gManual;
-            const float head   = (1.0f - blend) + blend * safetyHeadroom;
-
-            float outL = dryL * gFinal * head;
-            float outR = dryR * gFinal * head;
-
-            if (useAuto)
-            {
-                outL = plugin::softClipSafety (outL);
-                outR = plugin::softClipSafety (outR);
-            }
+            float outL = dryL * gFinal;
+            float outR = dryR * gFinal;
 
             ch0[i] = outL;
             if (ch1 != nullptr)
@@ -1030,20 +1044,12 @@ void YourPluginAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
         if (useAuto)
         {
             gAuto = autoGain.processStereo (dryL, dryR, mixedL, mixedR);
-            gAuto = juce::jlimit (0.0f, maxAutoGain, gAuto);
+            gAuto = juce::jmin (maxAutoGain, gAuto); // ✅ solo clamp alto
         }
 
         const float gFinal = blend * gAuto + (1.0f - blend) * gManual;
-        const float head   = (1.0f - blend) + blend * safetyHeadroom;
-
-        float outL = mixedL * gFinal * head;
-        float outR = mixedR * gFinal * head;
-
-        if (useAuto)
-        {
-            outL = plugin::softClipSafety (outL);
-            outR = plugin::softClipSafety (outR);
-        }
+        float outL = mixedL * gFinal;
+        float outR = mixedR * gFinal;
 
         ch0[i] = outL;
         if (ch1 != nullptr)
@@ -1057,5 +1063,6 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new YourPluginAudioProcessor();
 }
+
 
 
