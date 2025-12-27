@@ -264,7 +264,7 @@ private:
     int dryDelayBufferSize = 0;
 
     // Preset activo (stateful)
-    const PresetRegistry::Item* activePreset = nullptr;
+    const PresetRegistry::PresetDesc* activePreset = nullptr;
     int activePresetIndex = -1;
 
     using PresetStateStorage =
