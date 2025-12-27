@@ -218,6 +218,11 @@ struct Preset_API312512
         Real diffDC_x1  = 0.0;
         Real diffDC_y1  = 0.0;
 
+        // ---- Micro pre-delay (para “ambiente” más obvio) ----
+        static constexpr int kPreDlyN = 64;
+        Real preDly[kPreDlyN] = {0};
+        int  preDlyW = 0;
+
         // ---- Loading / HF control ----
         Real load_lp = 0.0;
         Real deFizz_lp = 0.0;
@@ -335,6 +340,9 @@ struct Preset_API312512
         s.diffDC_x1 = 0.0;
         s.diffDC_y1 = 0.0;
 
+        for (int i = 0; i < State::kPreDlyN; ++i) s.preDly[i] = 0.0;
+        s.preDlyW = 0;
+
         s.load_lp  = 0.0;
         s.deFizz_lp = 0.0;
         s.post1_lp  = 0.0;
@@ -382,16 +390,19 @@ struct Preset_API312512
             return (Real)0.5 + (Real)0.5 * y;
         };
 
-        const Real t1m = shapeMacro(tone1, (Real)3.2);
-        const Real t2m = shapeMacro(tone2, (Real)3.6);
+        // ============================================================
+        // ✅ PATCH 1) Macro mapping: menos “aplanado”, más rango audible
+        // ============================================================
+        const Real t1m = shapeMacro(tone1, (Real)1.55); // antes 3.2
+        const Real t2m = shapeMacro(tone2, (Real)1.75); // antes 3.6
 
-        // Tone1: izq hard punch, der smooth
-        const Real smooth01 = pow01(t1m, (Real)0.85);
-        const Real punch01  = pow01((Real)1.0 - t1m, (Real)0.85);
+        // Tone1: izq hard punch, der smooth (más drama en extremos)
+        const Real smooth01 = pow01(t1m, (Real)0.55);
+        const Real punch01  = pow01((Real)1.0 - t1m, (Real)0.55);
 
-        // Tone2: izq round, der presence/air
-        const Real pres01   = pow01(t2m, (Real)0.78);
-        const Real round01  = pow01((Real)1.0 - t2m, (Real)0.85);
+        // Tone2: izq round, der presence/air (más drama en extremos)
+        const Real pres01   = pow01(t2m, (Real)0.60);
+        const Real round01  = pow01((Real)1.0 - t2m, (Real)0.60);
 
         const Real t1Dist = std::fabs(tone1 - (Real)0.5) * (Real)2.0;
         const Real t2Dist = std::fabs(tone2 - (Real)0.5) * (Real)2.0;
@@ -579,7 +590,10 @@ struct Preset_API312512
 
             const Real presBand = s.pres_hi_lp - s.pres_lo_lp;
 
-            const Real gDb = ((Real)0.10 + (Real)1.10 * env01) * ((Real)0.75 + (Real)0.55 * pres01);
+            // ============================================================
+            // ✅ PATCH 5) Más impacto de presence cuando Tone2 → derecha
+            // ============================================================
+            const Real gDb = ((Real)0.20 + (Real)2.10 * env01) * ((Real)0.60 + (Real)0.95 * pres01);
             const Real g   = dbToLinT(gDb) - 1.0;
 
             high = high + presBand * g;
@@ -629,6 +643,12 @@ struct Preset_API312512
             Real slewMax = (Real)1.30 - (Real)0.45 * env01 - (Real)0.08 * sag01;
             slewMax = clampT(slewMax, (Real)0.35, (Real)1.55);
             slewMax *= ((Real)0.95 + (Real)0.25 * pres01);
+
+            // ============================================================
+            // ✅ PATCH 6A) SlewMax más dependiente de Tone1 (snap más audible)
+            // ============================================================
+            slewMax *= ((Real)0.85 + (Real)0.40 * punch01);  // punch = más snap
+            slewMax *= ((Real)1.10 - (Real)0.25 * smooth01); // smooth = menos snap
 
             const Real dx = high - s.slew_y;
             const Real dy = slewMax * std::tanh(dx / (slewMax + (Real)1.0e-12));
@@ -705,24 +725,42 @@ struct Preset_API312512
             const Real a1 = allpassCoefFromHzT(clampT(f1, (Real)240.0, (Real)11000.0), sr);
             const Real a2 = allpassCoefFromHzT(clampT(f2, (Real)420.0, (Real)16000.0), sr);
 
-            y = allpass1T(y, s.ap1_x1, s.ap1_y1, a1);
-            y = allpass1T(y, s.ap2_x1, s.ap2_y1, a2);
+            // ============================================================
+            // ✅ PATCH 6B) Allpass glue en paralelo (más audible / “depth”)
+            // ============================================================
+            const Real dryAP = y;
+            Real yAP = y;
+            yAP = allpass1T(yAP, s.ap1_x1, s.ap1_y1, a1);
+            yAP = allpass1T(yAP, s.ap2_x1, s.ap2_y1, a2);
+
+            Real apMix = (Real)0.10 + (Real)0.35 * smooth01;
+            apMix *= ((Real)1.00 - (Real)0.25 * pres01); // presence = menos “phasey”
+            apMix = clampT(apMix, (Real)0.0, (Real)0.40);
+
+            const Real gW = std::sqrt(apMix);
+            const Real gD = std::sqrt((Real)1 - apMix);
+            y = dryAP * gD + yAP * gW;
         }
 
         // Punch Bus paralelo (micro diffusion corto)
         {
             const Real dry = y;
 
-            // API = menos “space”: solo cuando Tone1 smooth lo pide un poco
-            Real busMix = (Real)0.00 + (Real)0.35 * (smooth01 * smooth01);
-            busMix = clampT(busMix, (Real)0.0, (Real)0.35);
+            // ============================================================
+            // ✅ PATCH 2) Más mix/fb + Tone2 decide “room vs air”
+            // ============================================================
+            const Real roomBoost = (Real)0.55 + (Real)0.65 * round01; // 0.55..1.20
+            const Real presTame  = (Real)1.0  - (Real)0.35 * pres01;  // 1.0..0.65
 
-            Real fb = (Real)0.00 + (Real)0.12 * (smooth01 * smooth01);
-            fb *= (Real)(0.85 + (Real)0.25 * round01);
-            fb = clampT(fb, (Real)0.0, (Real)0.12);
+            Real busMix = (Real)0.02 + (Real)0.62 * (smooth01 * smooth01) * roomBoost * presTame;
+            busMix = clampT(busMix, (Real)0.0, (Real)0.62);
 
-            busMix = clampT(busMix * macroI, (Real)0.0, (Real)0.38);
-            fb     = clampT(fb     * macroI, (Real)0.0, (Real)0.13);
+            Real fb = (Real)0.02 + (Real)0.20 * (smooth01 * smooth01) * roomBoost * presTame;
+            fb = clampT(fb, (Real)0.0, (Real)0.20);
+
+            // macro intensity (mantiene la idea original)
+            busMix = clampT(busMix * macroI, (Real)0.0, (Real)0.62);
+            fb     = clampT(fb     * macroI, (Real)0.0, (Real)0.20);
 
             Real dampFc = (Real)9000.0 + (Real)16000.0 * pres01;
             dampFc *= ((Real)1.00 - (Real)0.14 * env01);
@@ -747,7 +785,24 @@ struct Preset_API312512
                 s.diffFb = fbHP;
             }
 
-            Real wetIn = dry + s.diffFb;
+            // ============================================================
+            // ✅ PATCH 3) Micro pre-delay (8–20 samples aprox) para “ambiente”
+            // ============================================================
+            const int dly = (int)clampT(
+                (Real)8.0 + (Real)12.0 * smooth01 * ((Real)0.65 + (Real)0.35 * round01),
+                (Real)4.0, (Real)26.0
+            );
+
+            s.preDly[s.preDlyW] = dry;
+            int r = s.preDlyW - dly;
+            if (r < 0) r += State::kPreDlyN;
+            const Real dryPred = s.preDly[r];
+
+            s.preDlyW++;
+            if (s.preDlyW >= State::kPreDlyN) s.preDlyW = 0;
+
+            // ahora el bus “escucha” el predelay (ambiente más evidente)
+            Real wetIn = dryPred + s.diffFb;
 
             s.diffDamp = onePoleLPT(s.diffDamp, wetIn, aDamp);
             wetIn = s.diffDamp;
@@ -781,7 +836,7 @@ struct Preset_API312512
             if (std::fabs(s.diffFb) < (Real)1.0e-20)
                 s.diffFb += (Real)tinyNoiseDenormSafe(s);
 
-            const Real m  = clampT(busMix, (Real)0, (Real)0.38);
+            const Real m  = clampT(busMix, (Real)0, (Real)0.62);
             const Real gW = std::sqrt(m);
             const Real gD = std::sqrt((Real)1 - m);
             y = dry * gD + wetLoop * gW;
@@ -823,10 +878,12 @@ struct Preset_API312512
 
         // 12) Air shelf (RBJ) API-ish
         {
-            // round = recorta un poco, presence = abre
-            const Real airDbTarget = ((Real)-2.0 * round01) + ((Real)5.0 * pres01);
+            // ============================================================
+            // ✅ PATCH 4) Más rango de aire + smoothing más rápido
+            // ============================================================
+            const Real airDbTarget = ((Real)-4.5 * round01) + ((Real)8.0 * pres01);
 
-            const Real aG = alphaFromMsT((Real)28.0, sr);
+            const Real aG = alphaFromMsT((Real)18.0, sr); // antes 28ms
             s.airGain_sm = onePoleLPT(s.airGain_sm, airDbTarget, aG);
 
             const Real fcAir = (Real)10500.0 * trimFc;
@@ -1360,6 +1417,7 @@ private:
         return clampT(y, (Real)-1.35, (Real)1.35);
     }
 };
+
 
 
 
