@@ -136,13 +136,12 @@ public:
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
 
-        setMeasurementWindowMs (60.0f);    // 60–90ms = MUY rápido (más jitter)
-        setGainSmoothingMs (5.0f, 60.0f);  // attack 3–8ms, release 40–90ms
-        setGateHoldMs (40.0f);             // hold corto
-        setReturnToUnityMs (250.0f);       // vuelve a unity más rápido
+        setMeasurementWindowMs (160.0f);
+        setGainSmoothingMs (8.0f, 120.0f);
         setGateDb (-60.0f);
         setClampDb (-18.0f, +18.0f);
         setMeasureHighpassHz (120.0f);
+        setReturnToUnityMs (600.0f);
 
         reset();
     }
@@ -289,6 +288,7 @@ public:
     void prepare (double sampleRate)
     {
         sr = (sampleRate > 1000.0 ? sampleRate : 48000.0);
+
         // defaults “match rápido” (más agresivo que el perfil mastering)
         // Objetivo: que al mover Drive/Preamp el match se note al toque.
         setClampDb (-24.0f, +24.0f);
@@ -326,8 +326,8 @@ public:
     inline float processStereo (float dryL, float dryR, float outLpre, float outRpre) noexcept
     {
         // 1) K-weighting aplicado a DRY y a OUT (pre makeup)
-        const float inL  = inK.process (dryL,    0);
-        const float inR  = inK.process (dryR,    1);
+        const float inL  = inK.process (dryL,     0);
+        const float inR  = inK.process (dryR,     1);
         const float outL = outK.process (outLpre, 0);
         const float outR = outK.process (outRpre, 1);
 
@@ -901,3 +901,4 @@ struct LabeledKnob : juce::Component
 } // namespace ui
 
 } // namespace plugin
+
